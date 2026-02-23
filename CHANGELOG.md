@@ -8,6 +8,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-02-23
+
+### Changed / 变更
+
+- Sync with upstream Landscape v0.13.0 (add device mark) / 同步上游 Landscape v0.13.0（新增设备标记功能）
+
 ## [0.2.1] - 2026-02-13
 
 ### Added / 新增
@@ -85,7 +91,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Add concurrency group to prevent duplicate CI runs / 添加并发组以防止 CI 重复运行 (`ee11fe2`)
 - Add contents write permission for release job / 为发布任务添加内容写入权限 (`97b6240`)
 
-[Unreleased]: https://github.com/Cloud370/landscape-mini/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/Cloud370/landscape-mini/compare/v0.2.2...HEAD
+[0.2.2]: https://github.com/Cloud370/landscape-mini/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/Cloud370/landscape-mini/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/Cloud370/landscape-mini/compare/v0.1.2...v0.2.0
 [0.1.2]: https://github.com/Cloud370/landscape-mini/compare/v0.1.1...v0.1.2
