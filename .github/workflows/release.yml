@@ -49,11 +49,19 @@ jobs:
       - name: Validate promoted artifacts
         shell: bash
         run: |
+          set -euo pipefail
           shopt -s nullglob
           source build.env
           expected_version="$LANDSCAPE_VERSION"
-          expected_variants=(default docker alpine alpine-docker)
+          expected_tuples=(
+            "debian:false"
+            "debian:true"
+            "alpine:false"
+            "alpine:true"
+          )
           found=0
+          seen_tuples=","
+
           for dir in artifacts/*; do
             [ -d "$dir" ] || continue
             metadata="$dir/metadata/build-metadata.txt"
@@ -68,18 +76,24 @@ jobs:
               exit 1
             fi
             if [ ${#image[@]} -ne 1 ]; then
-              echo "Expected exactly one image in $dir" >&2
+              echo "Expected exactly one raw image in $dir" >&2
               exit 1
             fi
+
             git_sha="$(awk -F'=' '/^git_sha=/{print $2; exit}' "$metadata")"
-            variant="$(awk -F'=' '/^variant=/{print $2; exit}' "$metadata")"
+            base_system="$(awk -F'=' '/^base_system=/{print $2; exit}' "$metadata")"
+            include_docker="$(awk -F'=' '/^include_docker=/{print $2; exit}' "$metadata")"
+            output_formats="$(awk -F'=' '/^output_formats=/{print $2; exit}' "$metadata")"
+            produced_files="$(awk -F'=' '/^produced_files=/{print $2; exit}' "$metadata")"
             artifact_id="$(awk -F'=' '/^artifact_id=/{print $2; exit}' "$metadata")"
             resolved_version="$(awk -F'=' '/^resolved_version=/{print $2; exit}' "$metadata")"
+            tuple="${base_system}:${include_docker}"
+
             if [ "$git_sha" != "${{ steps.source.outputs.target_sha }}" ]; then
               echo "Artifact $artifact_id has git_sha=$git_sha, expected ${{ steps.source.outputs.target_sha }}" >&2
               exit 1
             fi
-            if [ -z "$variant" ] || [ -z "$artifact_id" ] || [ -z "$resolved_version" ]; then
+            if [ -z "$base_system" ] || [ -z "$include_docker" ] || [ -z "$artifact_id" ] || [ -z "$resolved_version" ]; then
               echo "Incomplete metadata in $metadata" >&2
               exit 1
             fi
@@ -87,15 +101,23 @@ jobs:
               echo "Artifact $artifact_id resolved_version=$resolved_version, expected $expected_version" >&2
               exit 1
             fi
+            if [ -z "$output_formats" ] || [ -z "$produced_files" ]; then
+              echo "Artifact $artifact_id missing output_formats or produced_files" >&2
+              exit 1
+            fi
+
             found=$((found + 1))
+            seen_tuples+="${tuple},"
           done
+
           if [ "$found" -ne 4 ]; then
             echo "Expected 4 promoted artifacts, found $found" >&2
             exit 1
           fi
-          for variant in "${expected_variants[@]}"; do
-            if ! grep -Rqs "^variant=${variant}$" artifacts/*/metadata/build-metadata.txt; then
-              echo "Missing promoted artifact for variant ${variant}" >&2
+
+          for tuple in "${expected_tuples[@]}"; do
+            if [[ "$seen_tuples" != *",${tuple},"* ]]; then
+              echo "Missing promoted artifact for tuple ${tuple}" >&2
               exit 1
             fi
           done
@@ -130,6 +152,7 @@ jobs:
             echo "- Source CI run: ${{ steps.source.outputs.source_run_id }}"
             echo "- Source commit: ${{ steps.source.outputs.target_sha }}"
             echo "- Validation: promoted existing CI artifacts only; no rebuild performed"
+            echo "- Required tuple coverage: debian/alpine × include_docker true/false"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Create GitHub Release
@@ -137,4 +160,6 @@ jobs:
         with:
           files: |
             artifacts/**/*.img.gz
+            artifacts/**/*.vmdk
+            artifacts/**/*.ova
           generate_release_notes: true

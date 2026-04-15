@@ -3,16 +3,25 @@ name: Custom Build
 on:
   workflow_dispatch:
     inputs:
-      variant:
-        description: "构建变体\nBuild variant"
+      base_system:
+        description: "基础系统\nBase system"
         required: true
-        default: default
+        default: debian
         type: choice
         options:
-          - default
-          - docker
+          - debian
           - alpine
-          - alpine-docker
+      include_docker:
+        description: "是否包含 Docker\nInclude Docker"
+        required: true
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+      output_formats:
+        description: "输出格式（逗号分隔，按顺序）\nOutput formats (comma-separated, ordered)"
+        default: "img"
       landscape_version:
         description: "Landscape 版本（留空时使用 build.env 默认值）\nLandscape version (empty uses build.env default)"
         default: ""
@@ -42,43 +51,26 @@ jobs:
   prepare:
     runs-on: ubuntu-24.04
     outputs:
-      build_flags: ${{ steps.flags.outputs.build_flags }}
-      run_e2e: ${{ steps.flags.outputs.run_e2e }}
+      run_e2e: ${{ steps.identity.outputs.run_e2e }}
       config_profile: ${{ steps.meta.outputs.config_profile }}
       topology_source: ${{ steps.meta.outputs.topology_source }}
       root_password: ${{ steps.creds.outputs.root_password }}
       root_password_source: ${{ steps.creds.outputs.root_password_source }}
       api_username: ${{ steps.creds.outputs.api_username }}
+      api_username_source: ${{ steps.creds.outputs.api_username_source }}
       api_password: ${{ steps.creds.outputs.api_password }}
-      api_credentials_source: ${{ steps.creds.outputs.api_credentials_source }}
+      api_password_source: ${{ steps.creds.outputs.api_password_source }}
     steps:
-      - name: Resolve variant flags
-        id: flags
+      - name: Resolve build identity metadata
+        id: identity
         shell: bash
         run: |
           set -euo pipefail
-          case "${{ github.event.inputs.variant }}" in
-            default)
-              echo "build_flags=" >> "$GITHUB_OUTPUT"
-              echo "run_e2e=true" >> "$GITHUB_OUTPUT"
-              ;;
-            docker)
-              echo "build_flags=--with-docker" >> "$GITHUB_OUTPUT"
-              echo "run_e2e=false" >> "$GITHUB_OUTPUT"
-              ;;
-            alpine)
-              echo "build_flags=--base alpine" >> "$GITHUB_OUTPUT"
-              echo "run_e2e=true" >> "$GITHUB_OUTPUT"
-              ;;
-            alpine-docker)
-              echo "build_flags=--base alpine --with-docker" >> "$GITHUB_OUTPUT"
-              echo "run_e2e=false" >> "$GITHUB_OUTPUT"
-              ;;
-            *)
-              echo "Unknown variant: ${{ github.event.inputs.variant }}" >&2
-              exit 1
-              ;;
-          esac
+          if [ "${{ github.event.inputs.include_docker }}" = "true" ]; then
+            echo "run_e2e=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "run_e2e=true" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Resolve config metadata
         id: meta
@@ -158,12 +150,14 @@ jobs:
         run: |
           cat <<'EOF' >> "$GITHUB_STEP_SUMMARY"
           ## 凭据说明
+          - 构建身份现在由 `base_system + include_docker + output_formats` 显式定义。
           - 为了方便，支持直接通过 workflow inputs 传入凭据。
           - 如果你特别注重安全，建议优先使用仓库 Secrets：`CUSTOM_ROOT_PASSWORD`、`CUSTOM_API_USERNAME`、`CUSTOM_API_PASSWORD`。
           - 构建 metadata 只记录凭据来源，不记录 secret 值。
           - 当前优先级：direct inputs > secrets > defaults。
 
           ## Credential guidance
+          - Build identity is now defined explicitly by `base_system + include_docker + output_formats`.
           - Direct workflow inputs are supported for convenience.
           - If security matters, prefer repository secrets: `CUSTOM_ROOT_PASSWORD`, `CUSTOM_API_USERNAME`, `CUSTOM_API_PASSWORD`.
           - Build metadata records only credential sources, never secret values.
@@ -174,8 +168,9 @@ jobs:
     needs: prepare
     uses: ./.github/workflows/_build-and-validate.yml
     with:
-      variant: ${{ github.event.inputs.variant }}
-      build_flags: ${{ needs.prepare.outputs.build_flags }}
+      base_system: ${{ github.event.inputs.base_system }}
+      include_docker: ${{ github.event.inputs.include_docker }}
+      output_formats: ${{ github.event.inputs.output_formats }}
       run_e2e: ${{ needs.prepare.outputs.run_e2e == 'true' }}
       landscape_version: ${{ github.event.inputs.landscape_version }}
       config_profile: ${{ needs.prepare.outputs.config_profile }}

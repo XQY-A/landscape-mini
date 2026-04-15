@@ -1,15 +1,18 @@
-name: Build and Validate Variant
+name: Build and Validate Image
 
 on:
   workflow_call:
     inputs:
-      variant:
+      base_system:
         required: true
         type: string
-      build_flags:
+      include_docker:
+        required: true
+        type: string
+      output_formats:
         required: false
         type: string
-        default: ""
+        default: "img"
       run_e2e:
         required: false
         type: boolean
@@ -81,7 +84,7 @@ env:
 jobs:
   build-and-validate:
     runs-on: ubuntu-24.04
-    timeout-minutes: 75
+    timeout-minutes: 90
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -97,12 +100,21 @@ jobs:
             source build.env
             resolved_version="$LANDSCAPE_VERSION"
           fi
-          artifact_id="${{ inputs.variant }}-${resolved_version}-${GITHUB_SHA::12}-${GITHUB_RUN_ID}"
+
+          build_name="landscape-mini-x86-${{ inputs.base_system }}"
+          if [ "${{ inputs.include_docker }}" = "true" ]; then
+            build_name="${build_name}-docker"
+          fi
+
+          artifact_tuple="${{ inputs.base_system }}-docker-${{ inputs.include_docker }}"
+          artifact_id="${artifact_tuple}-${resolved_version}-${GITHUB_SHA::12}-${GITHUB_RUN_ID}"
           {
             echo "resolved_version=$resolved_version"
+            echo "build_name=$build_name"
+            echo "artifact_tuple=$artifact_tuple"
             echo "artifact_id=$artifact_id"
-            echo "image_artifact=landscape-mini-x86-${artifact_id}"
-            echo "log_artifact=test-logs-${artifact_id}"
+            echo "image_artifact=landscape-mini-x86-$artifact_id"
+            echo "log_artifact=test-logs-$artifact_id"
           } >> "$GITHUB_OUTPUT"
 
       - name: Render effective topology config
@@ -160,7 +172,7 @@ jobs:
             grub-efi-amd64-bin grub-pc-bin qemu-utils rsync curl \
             sshpass socat jq qemu-system-x86 ovmf
 
-      - name: Build image (${{ inputs.variant }})
+      - name: Build image (${{ inputs.base_system }}, docker=${{ inputs.include_docker }})
         env:
           RESOLVED_VERSION: ${{ steps.meta.outputs.resolved_version }}
           EFFECTIVE_CONFIG_PATH: ${{ github.workspace }}/output/metadata/effective-landscape_init.toml
@@ -175,11 +187,21 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
           version_flag=()
           if [ -n "${RESOLVED_VERSION}" ]; then
             version_flag=(--version "${RESOLVED_VERSION}")
           fi
-          sudo APT_MIRROR="" ALPINE_MIRROR="" OUTPUT_FORMAT=img COMPRESS_OUTPUT=no \
+
+          format_flags=()
+          IFS=',' read -r -a requested_formats <<< "${{ inputs.output_formats }}"
+          for fmt in "${requested_formats[@]}"; do
+            fmt="${fmt//[[:space:]]/}"
+            [ -n "$fmt" ] || continue
+            format_flags+=(--output-format "$fmt")
+          done
+
+          sudo APT_MIRROR="" ALPINE_MIRROR="" \
             EFFECTIVE_CONFIG_PATH="${EFFECTIVE_CONFIG_PATH}" \
             EFFECTIVE_CONFIG_PROFILE="${EFFECTIVE_CONFIG_PROFILE}" \
             EFFECTIVE_TOPOLOGY_SOURCE="${EFFECTIVE_TOPOLOGY_SOURCE}" \
@@ -189,7 +211,11 @@ jobs:
             LANDSCAPE_ADMIN_USER_SOURCE="${LANDSCAPE_ADMIN_USER_SOURCE}" \
             LANDSCAPE_ADMIN_PASS="${LANDSCAPE_ADMIN_PASS}" \
             LANDSCAPE_ADMIN_PASS_SOURCE="${LANDSCAPE_ADMIN_PASS_SOURCE}" \
-            ./build.sh "${version_flag[@]}" ${{ inputs.build_flags }}
+            ./build.sh \
+            "${version_flag[@]}" \
+            --base-system "${{ inputs.base_system }}" \
+            --include-docker "${{ inputs.include_docker }}" \
+            "${format_flags[@]}"
 
       - name: Fix output permissions
         run: sudo chown -R "$(id -u):$(id -g)" output/ work/
@@ -198,46 +224,50 @@ jobs:
         env:
           RESOLVED_VERSION: ${{ steps.meta.outputs.resolved_version }}
           ARTIFACT_ID: ${{ steps.meta.outputs.artifact_id }}
+          BUILD_NAME: ${{ steps.meta.outputs.build_name }}
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p output/metadata "${TEST_LOG_DIR}"
-          image_file="$(ls output/*.img)"
-          image_base="$(basename "$image_file")"
-          if [[ -f output/metadata/resolved-sources.env ]]; then
-            source output/metadata/resolved-sources.env
+
+          metadata_path="output/metadata/build-metadata.txt"
+          if [ -f "$metadata_path" ]; then
+            source "$metadata_path"
           fi
-          resolved_apt_mirror="${resolved_apt_mirror:-unknown}"
-          resolved_apt_mirror_source="${resolved_apt_mirror_source:-unknown}"
-          resolved_alpine_mirror="${resolved_alpine_mirror:-unknown}"
-          resolved_alpine_mirror_source="${resolved_alpine_mirror_source:-unknown}"
-          resolved_docker_apt_mirror="${resolved_docker_apt_mirror:-unused}"
-          resolved_docker_apt_mirror_source="${resolved_docker_apt_mirror_source:-unused}"
-          resolved_docker_apt_gpg_url="${resolved_docker_apt_gpg_url:-unused}"
-          resolved_docker_apt_gpg_url_source="${resolved_docker_apt_gpg_url_source:-unused}"
+
+          image_file="${image_file:-${BUILD_NAME}.img}"
+          produced_files="${produced_files:-$image_file}"
+
           printf '%s\n' \
-            "variant=${{ inputs.variant }}" \
+            "base_system=${{ inputs.base_system }}" \
+            "include_docker=${{ inputs.include_docker }}" \
+            "output_formats=${{ inputs.output_formats }}" \
+            "produced_files=${produced_files}" \
+            "landscape_version=${landscape_version:-${RESOLVED_VERSION}}" \
             "resolved_version=${RESOLVED_VERSION}" \
             "artifact_id=${ARTIFACT_ID}" \
+            "artifact_tuple=${{ steps.meta.outputs.artifact_tuple }}" \
             "git_sha=${GITHUB_SHA}" \
             "run_id=${GITHUB_RUN_ID}" \
             "workflow=${GITHUB_WORKFLOW}" \
-            "image_file=${image_base}" \
+            "build_name=${BUILD_NAME}" \
+            "image_file=${image_file}" \
             "config_profile=${{ inputs.config_profile }}" \
             "topology_source=${{ inputs.topology_source }}" \
             "root_password_source=${{ inputs.root_password_source }}" \
             "api_username_source=${{ inputs.api_username_source }}" \
             "api_password_source=${{ inputs.api_password_source }}" \
             "api_username=${{ inputs.api_username }}" \
-            "resolved_apt_mirror=${resolved_apt_mirror}" \
-            "resolved_apt_mirror_source=${resolved_apt_mirror_source}" \
-            "resolved_alpine_mirror=${resolved_alpine_mirror}" \
-            "resolved_alpine_mirror_source=${resolved_alpine_mirror_source}" \
-            "resolved_docker_apt_mirror=${resolved_docker_apt_mirror}" \
-            "resolved_docker_apt_mirror_source=${resolved_docker_apt_mirror_source}" \
-            "resolved_docker_apt_gpg_url=${resolved_docker_apt_gpg_url}" \
-            "resolved_docker_apt_gpg_url_source=${resolved_docker_apt_gpg_url_source}" \
+            "resolved_apt_mirror=${resolved_apt_mirror:-unused}" \
+            "resolved_apt_mirror_source=${resolved_apt_mirror_source:-unused}" \
+            "resolved_alpine_mirror=${resolved_alpine_mirror:-unused}" \
+            "resolved_alpine_mirror_source=${resolved_alpine_mirror_source:-unused}" \
+            "resolved_docker_apt_mirror=${resolved_docker_apt_mirror:-unused}" \
+            "resolved_docker_apt_mirror_source=${resolved_docker_apt_mirror_source:-unused}" \
+            "resolved_docker_apt_gpg_url=${resolved_docker_apt_gpg_url:-unused}" \
+            "resolved_docker_apt_gpg_url_source=${resolved_docker_apt_gpg_url_source:-unused}" \
             > output/metadata/build-metadata.txt
+
           cp output/metadata/build-metadata.txt "${TEST_LOG_DIR}/build-metadata.txt"
 
       - name: List outputs
@@ -249,34 +279,40 @@ jobs:
           name: ${{ steps.meta.outputs.image_artifact }}
           path: |
             output/*.img
+            output/*.vmdk
+            output/*.ova
             output/metadata/build-metadata.txt
             output/metadata/effective-landscape_init.toml
           retention-days: ${{ inputs.image_retention_days }}
 
-      - name: Run readiness checks (${{ inputs.variant }})
+      - name: Run readiness checks (${{ inputs.base_system }}, docker=${{ inputs.include_docker }})
         env:
-          LANDSCAPE_TEST_VARIANT: ${{ inputs.variant }}
+          LANDSCAPE_TEST_BASE_SYSTEM: ${{ inputs.base_system }}
+          LANDSCAPE_TEST_INCLUDE_DOCKER: ${{ inputs.include_docker }}
+          LANDSCAPE_TEST_OUTPUT_FORMATS: ${{ inputs.output_formats }}
           LANDSCAPE_TEST_ARTIFACT_ID: ${{ steps.meta.outputs.artifact_id }}
           LANDSCAPE_TEST_LANDSCAPE_VERSION: ${{ steps.meta.outputs.resolved_version }}
           LANDSCAPE_EFFECTIVE_INIT_CONFIG: output/metadata/effective-landscape_init.toml
           SSH_PASSWORD: ${{ inputs.root_password }}
           API_USERNAME: ${{ inputs.api_username }}
           API_PASSWORD: ${{ inputs.api_password }}
-        run: timeout --foreground 20m ./tests/test-readiness.sh output/*.img
+        run: timeout --foreground 20m ./tests/test-readiness.sh output/${{ steps.meta.outputs.build_name }}.img
 
-      - name: Run dataplane tests (${{ inputs.variant }})
+      - name: Run dataplane tests (${{ inputs.base_system }}, docker=${{ inputs.include_docker }})
         if: ${{ inputs.run_e2e }}
         env:
-          LANDSCAPE_TEST_VARIANT: ${{ inputs.variant }}
+          LANDSCAPE_TEST_BASE_SYSTEM: ${{ inputs.base_system }}
+          LANDSCAPE_TEST_INCLUDE_DOCKER: ${{ inputs.include_docker }}
+          LANDSCAPE_TEST_OUTPUT_FORMATS: ${{ inputs.output_formats }}
           LANDSCAPE_TEST_ARTIFACT_ID: ${{ steps.meta.outputs.artifact_id }}
           LANDSCAPE_TEST_LANDSCAPE_VERSION: ${{ steps.meta.outputs.resolved_version }}
           LANDSCAPE_EFFECTIVE_INIT_CONFIG: output/metadata/effective-landscape_init.toml
           SSH_PASSWORD: ${{ inputs.root_password }}
           API_USERNAME: ${{ inputs.api_username }}
           API_PASSWORD: ${{ inputs.api_password }}
-        run: timeout --foreground 25m ./tests/test-dataplane.sh output/*.img
+        run: timeout --foreground 25m ./tests/test-dataplane.sh output/${{ steps.meta.outputs.build_name }}.img
 
-      - name: Mark E2E not scheduled for this variant
+      - name: Mark E2E not scheduled for this build identity
         if: ${{ !inputs.run_e2e }}
         env:
           ARTIFACT_ID: ${{ steps.meta.outputs.artifact_id }}
@@ -285,9 +321,10 @@ jobs:
           set -euo pipefail
           mkdir -p "${TEST_LOG_DIR}"
           printf '%s\n' \
-            "variant=${{ inputs.variant }}" \
+            "base_system=${{ inputs.base_system }}" \
+            "include_docker=${{ inputs.include_docker }}" \
             "artifact_id=${ARTIFACT_ID}" \
-            "reason=E2E reserved for representative coverage only" \
+            "reason=E2E reserved for include_docker=false builds only" \
             > "${TEST_LOG_DIR}/e2e-skipped.txt"
 
       - name: Upload validation logs
