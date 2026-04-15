@@ -21,6 +21,14 @@ fi
 # Parse command line arguments
 # ---------------------------------------------------------------------------
 SKIP_TO_PHASE=0
+EFFECTIVE_CONFIG_PATH="${EFFECTIVE_CONFIG_PATH:-}"
+EFFECTIVE_CONFIG_PROFILE="${EFFECTIVE_CONFIG_PROFILE:-default}"
+EFFECTIVE_TOPOLOGY_SOURCE="${EFFECTIVE_TOPOLOGY_SOURCE:-default}"
+ROOT_PASSWORD_SOURCE="${ROOT_PASSWORD_SOURCE:-default}"
+LANDSCAPE_ADMIN_USER="${LANDSCAPE_ADMIN_USER:-root}"
+LANDSCAPE_ADMIN_USER_SOURCE="${LANDSCAPE_ADMIN_USER_SOURCE:-default}"
+LANDSCAPE_ADMIN_PASS="${LANDSCAPE_ADMIN_PASS:-root}"
+LANDSCAPE_ADMIN_PASS_SOURCE="${LANDSCAPE_ADMIN_PASS_SOURCE:-default}"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -143,6 +151,9 @@ echo "  Image Size        : ${IMAGE_SIZE_MB} MB"
 echo "  Include Docker    : ${INCLUDE_DOCKER}"
 echo "  Output Format     : ${OUTPUT_FORMAT}"
 echo "  Compress Output   : ${COMPRESS_OUTPUT}"
+echo "  Config Profile    : ${EFFECTIVE_CONFIG_PROFILE}"
+echo "  Topology Source   : ${EFFECTIVE_TOPOLOGY_SOURCE}"
+echo "  Admin User        : ${LANDSCAPE_ADMIN_USER}"
 echo "============================================================"
 
 # ---------------------------------------------------------------------------

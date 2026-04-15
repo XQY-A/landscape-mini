@@ -1,0 +1,200 @@
+name: Custom Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      variant:
+        description: "Build variant"
+        required: true
+        default: default
+        type: choice
+        options:
+          - default
+          - docker
+          - alpine
+          - alpine-docker
+      landscape_version:
+        description: "Landscape version (empty uses build.env default)"
+        default: ""
+      lan_server_ip:
+        description: "LAN gateway / DHCP server IP (optional)"
+        default: ""
+      lan_range_start:
+        description: "LAN DHCP range start (optional)"
+        default: ""
+      lan_range_end:
+        description: "LAN DHCP range end (optional)"
+        default: ""
+      lan_netmask:
+        description: "LAN subnet prefix length, e.g. 24 (optional)"
+        default: ""
+      root_password:
+        description: "Linux root/ld password (plaintext, prefer secret)"
+        default: ""
+      api_username:
+        description: "Web admin username (plaintext, prefer secret)"
+        default: ""
+      api_password:
+        description: "Web admin password (plaintext, prefer secret)"
+        default: ""
+      ack_plaintext_credentials:
+        description: "Set true if you intentionally provided plaintext credentials above"
+        required: true
+        default: false
+        type: boolean
+
+jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    outputs:
+      build_flags: ${{ steps.flags.outputs.build_flags }}
+      run_e2e: ${{ steps.flags.outputs.run_e2e }}
+      config_profile: ${{ steps.meta.outputs.config_profile }}
+      topology_source: ${{ steps.meta.outputs.topology_source }}
+      root_password: ${{ steps.creds.outputs.root_password }}
+      root_password_source: ${{ steps.creds.outputs.root_password_source }}
+      api_username: ${{ steps.creds.outputs.api_username }}
+      api_password: ${{ steps.creds.outputs.api_password }}
+      api_credentials_source: ${{ steps.creds.outputs.api_credentials_source }}
+    steps:
+      - name: Validate plaintext credential acknowledgement
+        shell: bash
+        run: |
+          set -euo pipefail
+          if { [ -n "${{ github.event.inputs.root_password }}" ] || [ -n "${{ github.event.inputs.api_username }}" ] || [ -n "${{ github.event.inputs.api_password }}" ]; } && [ "${{ github.event.inputs.ack_plaintext_credentials }}" != "true" ]; then
+            echo "Plaintext credentials were provided via workflow inputs. Re-run with ack_plaintext_credentials=true or prefer GitHub Secrets." >&2
+            exit 1
+          fi
+
+      - name: Resolve variant flags
+        id: flags
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "${{ github.event.inputs.variant }}" in
+            default)
+              echo "build_flags=" >> "$GITHUB_OUTPUT"
+              echo "run_e2e=true" >> "$GITHUB_OUTPUT"
+              ;;
+            docker)
+              echo "build_flags=--with-docker" >> "$GITHUB_OUTPUT"
+              echo "run_e2e=false" >> "$GITHUB_OUTPUT"
+              ;;
+            alpine)
+              echo "build_flags=--base alpine" >> "$GITHUB_OUTPUT"
+              echo "run_e2e=true" >> "$GITHUB_OUTPUT"
+              ;;
+            alpine-docker)
+              echo "build_flags=--base alpine --with-docker" >> "$GITHUB_OUTPUT"
+              echo "run_e2e=false" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "Unknown variant: ${{ github.event.inputs.variant }}" >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Resolve config metadata
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          topology_source=default
+          if [ -n "${{ github.event.inputs.lan_server_ip }}" ] || [ -n "${{ github.event.inputs.lan_range_start }}" ] || [ -n "${{ github.event.inputs.lan_range_end }}" ] || [ -n "${{ github.event.inputs.lan_netmask }}" ]; then
+            topology_source=input
+          fi
+          config_profile=default
+          if [ "$topology_source" != default ]; then
+            config_profile=custom
+          fi
+          {
+            echo "config_profile=$config_profile"
+            echo "topology_source=$topology_source"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Resolve credentials with precedence
+        id: creds
+        env:
+          INPUT_ROOT_PASSWORD: ${{ github.event.inputs.root_password }}
+          INPUT_API_USERNAME: ${{ github.event.inputs.api_username }}
+          INPUT_API_PASSWORD: ${{ github.event.inputs.api_password }}
+          SECRET_ROOT_PASSWORD: ${{ secrets.CUSTOM_ROOT_PASSWORD }}
+          SECRET_API_USERNAME: ${{ secrets.CUSTOM_API_USERNAME }}
+          SECRET_API_PASSWORD: ${{ secrets.CUSTOM_API_PASSWORD }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          root_password="$INPUT_ROOT_PASSWORD"
+          root_password_source=input
+          if [ -z "$root_password" ]; then
+            root_password="$SECRET_ROOT_PASSWORD"
+            root_password_source=secret
+          fi
+          if [ -z "$root_password" ]; then
+            root_password="landscape"
+            root_password_source=default
+          fi
+
+          api_username="$INPUT_API_USERNAME"
+          api_username_source=input
+          if [ -z "$api_username" ]; then
+            api_username="$SECRET_API_USERNAME"
+            api_username_source=secret
+          fi
+          if [ -z "$api_username" ]; then
+            api_username="root"
+            api_username_source=default
+          fi
+
+          api_password="$INPUT_API_PASSWORD"
+          api_password_source=input
+          if [ -z "$api_password" ]; then
+            api_password="$SECRET_API_PASSWORD"
+            api_password_source=secret
+          fi
+          if [ -z "$api_password" ]; then
+            api_password="root"
+            api_password_source=default
+          fi
+
+          {
+            echo "root_password=$root_password"
+            echo "root_password_source=$root_password_source"
+            echo "api_username=$api_username"
+            echo "api_username_source=$api_username_source"
+            echo "api_password=$api_password"
+            echo "api_password_source=$api_password_source"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Credential guidance
+        shell: bash
+        run: |
+          cat <<'EOF' >> "$GITHUB_STEP_SUMMARY"
+          ## Credential handling
+          - Direct workflow inputs are plaintext and should only be used intentionally.
+          - Prefer repository secrets: `CUSTOM_ROOT_PASSWORD`, `CUSTOM_API_USERNAME`, `CUSTOM_API_PASSWORD`.
+          - Build metadata records only credential sources, never secret values.
+          - Current precedence: direct inputs > secrets > defaults.
+          EOF
+
+  build:
+    needs: prepare
+    uses: ./.github/workflows/_build-and-validate.yml
+    with:
+      variant: ${{ github.event.inputs.variant }}
+      build_flags: ${{ needs.prepare.outputs.build_flags }}
+      run_e2e: ${{ needs.prepare.outputs.run_e2e == 'true' }}
+      landscape_version: ${{ github.event.inputs.landscape_version }}
+      config_profile: ${{ needs.prepare.outputs.config_profile }}
+      topology_source: ${{ needs.prepare.outputs.topology_source }}
+      lan_server_ip: ${{ github.event.inputs.lan_server_ip }}
+      lan_range_start: ${{ github.event.inputs.lan_range_start }}
+      lan_range_end: ${{ github.event.inputs.lan_range_end }}
+      lan_netmask: ${{ github.event.inputs.lan_netmask }}
+      root_password: ${{ needs.prepare.outputs.root_password }}
+      root_password_source: ${{ needs.prepare.outputs.root_password_source }}
+      api_username: ${{ needs.prepare.outputs.api_username }}
+      api_username_source: ${{ needs.prepare.outputs.api_username_source }}
+      api_password: ${{ needs.prepare.outputs.api_password }}
+      api_password_source: ${{ needs.prepare.outputs.api_password_source }}

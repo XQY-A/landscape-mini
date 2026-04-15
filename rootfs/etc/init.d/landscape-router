@@ -11,6 +11,11 @@ depend() {
 }
 
 start_pre() {
+    if [ -f /etc/landscape/runtime.env ]; then
+        set -a
+        . /etc/landscape/runtime.env
+        set +a
+    fi
     if [ ! -f /root/.landscape-router/landscape_init.toml ]; then
         command_args="--auto"
     fi

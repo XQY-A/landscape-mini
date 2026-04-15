@@ -110,31 +110,47 @@ setup-mirror.sh
 | SSH / 系统登录 | `ld` | `landscape` |
 | 管理网页 | `root` | `root` |
 
+> `custom-build.yml` 支持通过 workflow inputs 或 GitHub Secrets 覆盖 Linux/Web 管理凭据。明文 inputs 有泄露风险，优先使用 `CUSTOM_ROOT_PASSWORD`、`CUSTOM_API_USERNAME`、`CUSTOM_API_PASSWORD`。
+
 ## 构建配置
 
 编辑 `build.env` 或通过环境变量覆盖：
 
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
-| `APT_MIRROR` | 清华镜像 | Debian 软件源地址 |
-| `LANDSCAPE_VERSION` | `latest` | Landscape 版本号（或指定 tag） |
+| `APT_MIRROR` | `http://deb.debian.org/debian` | Debian 软件源地址 |
+| `ALPINE_MIRROR` | `https://dl-cdn.alpinelinux.org/alpine` | Alpine 软件源地址 |
+| `LANDSCAPE_VERSION` | `v0.18.2` | 上游 Landscape 版本号（或指定 tag） |
+| `LANDSCAPE_REPO` | `https://github.com/ThisSeanZhang/landscape` | 上游 Landscape 发布仓库 |
 | `OUTPUT_FORMAT` | `img` | 输出格式：`img`、`vmdk`、`both` |
 | `COMPRESS_OUTPUT` | `yes` | 是否压缩输出镜像 |
-| `IMAGE_SIZE_MB` | `1024` | 初始镜像大小（最终会自动缩小） |
-| `ROOT_PASSWORD` | `landscape` | root 密码 |
+| `IMAGE_SIZE_MB` | `2048` | 初始镜像大小（最终会自动缩小） |
+| `ROOT_PASSWORD` | `landscape` | root / ld 登录密码 |
 | `TIMEZONE` | `Asia/Shanghai` | 时区 |
+| `LOCALE` | `en_US.UTF-8` | 系统 locale |
 
-### build.sh 参数
+### 自定义构建（GitHub Actions）
 
-```bash
-sudo ./build.sh                          # 默认构建（Debian）
-sudo ./build.sh --base alpine            # 构建 Alpine 镜像
-sudo ./build.sh --with-docker            # 包含 Docker
-sudo ./build.sh --version v0.12.4        # 指定版本
-sudo ./build.sh --skip-to 5              # 从第 5 阶段恢复构建
-```
+仓库新增 `custom-build.yml`，面向 fork 用户提供单变体构建入口，支持：
 
-## 构建流程
+- `variant`：`default` / `docker` / `alpine` / `alpine-docker`
+- `landscape_version`
+- `lan_server_ip` / `lan_range_start` / `lan_range_end` / `lan_netmask`
+- `root_password`
+- `api_username` / `api_password`
+- `ack_plaintext_credentials`：当使用上述明文凭据 inputs 时，必须显式设为 `true`
+
+当前优先级：**direct inputs > secrets > defaults**。
+
+推荐把密码类信息放在 GitHub Secrets：
+- `CUSTOM_ROOT_PASSWORD`
+- `CUSTOM_API_USERNAME`
+- `CUSTOM_API_PASSWORD`
+
+如果使用 GitHub Secrets，则不需要设置 `ack_plaintext_credentials`；只有在使用明文 inputs 时，未确认会导致 workflow 直接失败。
+
+workflow 会把**凭据来源信息**按字段写入 `build-metadata.txt`（例如 `api_username_source` / `api_password_source`），同时会记录 `api_username` 的实际值，但不会把密码明文写入 artifact。网络拓扑的有效配置会随 artifact 一起携带为 `effective-landscape_init.toml`，供 `test.yml` 和 release promotion 校验使用。
+
 
 `build.sh` 采用 **编排器 + 后端** 架构，按 8 个阶段顺序执行：
 
@@ -228,17 +244,21 @@ Router VM (eth0=WAN/SLIRP, eth1=LAN/mcast) ←→ Client VM (CirrOS, eth0=mcast)
 │   ├── test-readiness.sh  # Router readiness 测试（共享 SSH/API ready 契约）
 │   └── test-dataplane.sh  # Dataplane 测试（双 VM：DHCP + LAN 连通）
 └── .github/workflows/
-    ├── ci.yml            # CI：4 变体并行构建+测试
-    ├── release.yml       # Release：构建+测试+发布
-    └── test.yml          # 独立测试（手动触发）
+    ├── ci.yml                  # CI：调用可复用单变体构建验证 workflow
+    ├── _build-and-validate.yml # 可复用的单变体 build + validate workflow
+    ├── custom-build.yml        # fork 用户手动自定义构建入口
+    ├── release.yml             # Release：promote 已验证 CI artifact 并发布
+    └── test.yml                # 独立复测（手动触发，可重传凭据）
 ```
 
 ## CI/CD
 
-- **触发条件**：推送到 main（构建相关文件变更时）或手动触发
-- **构建矩阵**：4 变体完全并行（`default`、`docker`、`alpine`、`alpine-docker`）
-- **每个变体**：构建 → readiness 检查 → dataplane 测试（合并为单个 job，互不等待）
-- **Release**：打 `v*` 标签时自动压缩镜像并创建 GitHub Release
+- **CI**：手动触发始终可用；对 push 到 `main` / PR，仅在构建相关文件、`.github/` 下相关文件或 `CHANGELOG.md` 变更时自动运行，4 个 variant 通过可复用 workflow 独立构建验证
+- **Readiness / E2E 覆盖**：`default`、`alpine` 运行 readiness + dataplane；`docker`、`alpine-docker` 运行 readiness，并显式记录 E2E skipped
+- **Artifact contract**：每个 image artifact 都包含 `.img`、`build-metadata.txt`、`effective-landscape_init.toml`
+- **Custom Build**：`custom-build.yml` 支持 fork 用户按单 variant 构建，并支持 LAN/DHCP、Linux 密码、Web 管理账号密码输入
+- **Manual Retest**：`test.yml` 当前支持按 `run_id` 复测一整组 CI artifacts，并重新传入 SSH / API 凭据；`artifact_suffix` 更适合作为已知 artifact 标识的高级输入，而不是文档承诺的单 artifact 精确复测入口
+- **Release**：推送 `v*` tag 时，`release.yml` 仅 promote 同一 commit 上已通过 CI 的 artifact，校验后压缩并创建 GitHub Release
 
 ## 许可证
 

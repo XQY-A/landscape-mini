@@ -104,10 +104,13 @@ Auto-detects Debian / Alpine and runs `apt update` or `apk update` after switchi
 
 ## Default Credentials
 
-| User | Password |
-|------|----------|
-| `root` | `landscape` |
-| `ld` | `landscape` |
+| Scope | User | Password |
+|------|------|----------|
+| SSH / system login | `root` | `landscape` |
+| SSH / system login | `ld` | `landscape` |
+| Web admin | `root` | `root` |
+
+> `custom-build.yml` can override Linux and web admin credentials via workflow inputs or GitHub Secrets. Plaintext inputs are less safe; prefer `CUSTOM_ROOT_PASSWORD`, `CUSTOM_API_USERNAME`, and `CUSTOM_API_PASSWORD`.
 
 ## Build Configuration
 
@@ -115,25 +118,39 @@ Edit `build.env` or override via environment variables:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `APT_MIRROR` | Tsinghua mirror | Debian mirror URL |
-| `LANDSCAPE_VERSION` | `latest` | Landscape release version |
+| `APT_MIRROR` | `http://deb.debian.org/debian` | Debian mirror URL |
+| `ALPINE_MIRROR` | `https://dl-cdn.alpinelinux.org/alpine` | Alpine mirror URL |
+| `LANDSCAPE_VERSION` | `v0.18.2` | Upstream Landscape release version |
+| `LANDSCAPE_REPO` | `https://github.com/ThisSeanZhang/landscape` | Upstream Landscape release repository |
 | `OUTPUT_FORMAT` | `img` | Output format: `img`, `vmdk`, `both` |
 | `COMPRESS_OUTPUT` | `yes` | Compress output image |
-| `IMAGE_SIZE_MB` | `1024` | Initial image size (auto-shrunk) |
-| `ROOT_PASSWORD` | `landscape` | Root password |
+| `IMAGE_SIZE_MB` | `2048` | Initial image size (auto-shrunk) |
+| `ROOT_PASSWORD` | `landscape` | Root / ld login password |
 | `TIMEZONE` | `Asia/Shanghai` | System timezone |
+| `LOCALE` | `en_US.UTF-8` | System locale |
 
-### build.sh Flags
+### Custom Build via GitHub Actions
 
-```bash
-sudo ./build.sh                          # Default build (Debian)
-sudo ./build.sh --base alpine            # Build Alpine image
-sudo ./build.sh --with-docker            # Include Docker
-sudo ./build.sh --version v0.12.4        # Specific version
-sudo ./build.sh --skip-to 5              # Resume from phase 5
-```
+The repository now includes `custom-build.yml`, a fork-user-oriented single-variant build entrypoint. It supports:
 
-## Build Pipeline (8 Phases)
+- `variant`: `default` / `docker` / `alpine` / `alpine-docker`
+- `landscape_version`
+- `lan_server_ip` / `lan_range_start` / `lan_range_end` / `lan_netmask`
+- `root_password`
+- `api_username` / `api_password`
+- `ack_plaintext_credentials`: must be set to `true` when the plaintext credential inputs above are used
+
+Current precedence is **direct inputs > secrets > defaults**.
+
+For passwords, prefer GitHub Secrets:
+- `CUSTOM_ROOT_PASSWORD`
+- `CUSTOM_API_USERNAME`
+- `CUSTOM_API_PASSWORD`
+
+If you use GitHub Secrets, `ack_plaintext_credentials` is not needed; the workflow only requires it for plaintext credential inputs and will fail fast otherwise.
+
+The workflow records **credential source information per field** in `build-metadata.txt` (for example `api_username_source` / `api_password_source`), and it also records the effective `api_username`, but it never stores plaintext passwords in artifacts. The effective network topology is carried inside each artifact as `effective-landscape_init.toml`, which is then reused by `test.yml` and release promotion validation.
+
 
 `build.sh` uses an **orchestrator + backend** architecture:
 
@@ -227,17 +244,21 @@ Logs saved to `output/test-logs/`.
 │   ├── test-readiness.sh  # Router readiness tests (shared SSH/API ready contract)
 │   └── test-dataplane.sh  # Dataplane tests (dual VM: DHCP + LAN connectivity)
 └── .github/workflows/
-    ├── ci.yml            # CI: 4-variant parallel build+test
-    ├── release.yml       # Release: build+test+publish
-    └── test.yml          # Standalone test (manual trigger)
+    ├── ci.yml                  # CI: calls the reusable single-variant build+validate workflow
+    ├── _build-and-validate.yml # Reusable single-variant build + validate workflow
+    ├── custom-build.yml        # Manual fork-user custom build entrypoint
+    ├── release.yml             # Release: promote validated CI artifacts and publish
+    └── test.yml                # Manual retest workflow with credential re-entry
 ```
 
 ## CI/CD
 
-- **Triggers**: push to main (build files changed) or manual dispatch
-- **Matrix**: 4 variants fully parallel (`default`, `docker`, `alpine`, `alpine-docker`)
-- **Per variant**: build → readiness checks → dataplane tests (merged into single job, no cross-waiting)
-- **Release**: `v*` tags trigger compression and GitHub Release creation
+- **CI**: manual dispatch is always available; automatic runs on pushes to `main` and PRs happen only when build-related files, files under `.github/`, or `CHANGELOG.md` change, and each of the 4 variants uses the reusable workflow independently
+- **Readiness / E2E coverage**: `default` and `alpine` run readiness + dataplane; `docker` and `alpine-docker` run readiness and explicitly record E2E as skipped
+- **Artifact contract**: each image artifact contains the `.img`, `build-metadata.txt`, and `effective-landscape_init.toml`
+- **Custom Build**: `custom-build.yml` lets fork users build one selected variant with LAN/DHCP, Linux password, and web admin credential inputs
+- **Manual Retest**: `test.yml` currently supports retesting a full CI artifact set by `run_id` and re-supplying SSH / API credentials; `artifact_suffix` is better treated as an advanced known-artifact input than as a documented single-artifact precision retest entrypoint
+- **Release**: pushing a `v*` tag now promotes already-validated artifacts from the matching CI run, then compresses and publishes them
 
 ## License
 

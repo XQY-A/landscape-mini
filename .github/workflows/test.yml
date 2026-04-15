@@ -12,6 +12,20 @@ on:
       landscape_version:
         description: "Expected Landscape version for metadata (optional)"
         default: ""
+      ssh_password:
+        description: "Linux SSH password for retest (plaintext, prefer CUSTOM_ROOT_PASSWORD secret)"
+        default: ""
+      api_username:
+        description: "Web admin username for retest (plaintext, prefer CUSTOM_API_USERNAME secret)"
+        default: ""
+      api_password:
+        description: "Web admin password for retest (plaintext, prefer CUSTOM_API_PASSWORD secret)"
+        default: ""
+      ack_plaintext_credentials:
+        description: "Set true if you intentionally provided plaintext credentials above"
+        required: true
+        default: false
+        type: boolean
 
 jobs:
   test:
@@ -29,10 +43,94 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install test dependencies
+      - name: Validate plaintext credential acknowledgement
+        env:
+          INPUT_SSH_PASSWORD: ${{ github.event.inputs.ssh_password }}
+          INPUT_API_USERNAME: ${{ github.event.inputs.api_username }}
+          INPUT_API_PASSWORD: ${{ github.event.inputs.api_password }}
+          INPUT_ACK_PLAINTEXT_CREDENTIALS: ${{ github.event.inputs.ack_plaintext_credentials }}
+        shell: bash
         run: |
-          sudo apt-get update
-          sudo apt-get install -y sshpass socat curl jq qemu-system-x86 ovmf unzip
+          set -euo pipefail
+          if { [ -n "$INPUT_SSH_PASSWORD" ] || [ -n "$INPUT_API_USERNAME" ] || [ -n "$INPUT_API_PASSWORD" ]; } && [ "$INPUT_ACK_PLAINTEXT_CREDENTIALS" != "true" ]; then
+            echo "Plaintext credentials were provided via workflow inputs. Re-run with ack_plaintext_credentials=true or prefer GitHub Secrets." >&2
+            exit 1
+          fi
+
+      - name: Resolve retest credentials
+        id: creds
+        env:
+          INPUT_SSH_PASSWORD: ${{ github.event.inputs.ssh_password }}
+          INPUT_API_USERNAME: ${{ github.event.inputs.api_username }}
+          INPUT_API_PASSWORD: ${{ github.event.inputs.api_password }}
+          SECRET_ROOT_PASSWORD: ${{ secrets.CUSTOM_ROOT_PASSWORD }}
+          SECRET_API_USERNAME: ${{ secrets.CUSTOM_API_USERNAME }}
+          SECRET_API_PASSWORD: ${{ secrets.CUSTOM_API_PASSWORD }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ssh_password="$INPUT_SSH_PASSWORD"
+          if [ -z "$ssh_password" ]; then
+            ssh_password="$SECRET_ROOT_PASSWORD"
+          fi
+          if [ -z "$ssh_password" ]; then
+            ssh_password="landscape"
+          fi
+
+          api_username="$INPUT_API_USERNAME"
+          if [ -z "$api_username" ]; then
+            api_username="$SECRET_API_USERNAME"
+          fi
+          if [ -z "$api_username" ]; then
+            api_username="root"
+          fi
+
+          api_password="$INPUT_API_PASSWORD"
+          if [ -z "$api_password" ]; then
+            api_password="$SECRET_API_PASSWORD"
+          fi
+          if [ -z "$api_password" ]; then
+            api_password="root"
+          fi
+
+          {
+            echo "ssh_password=$ssh_password"
+            echo "api_username=$api_username"
+            echo "api_password=$api_password"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Install test dependencies
+        timeout-minutes: 10
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          apt_retry() {
+            local attempt
+            for attempt in 1 2 3; do
+              if "$@"; then
+                return 0
+              fi
+              if [ "$attempt" -eq 3 ]; then
+                echo "Command failed after ${attempt} attempts: $*" >&2
+                return 1
+              fi
+              echo "Command failed on attempt ${attempt}, retrying: $*" >&2
+            done
+          }
+
+          apt_retry sudo apt-get \
+            -o Acquire::Retries=3 \
+            -o Acquire::http::Timeout=60 \
+            -o Acquire::https::Timeout=60 \
+            update
+
+          apt_retry sudo apt-get \
+            -o Acquire::Retries=3 \
+            -o Acquire::http::Timeout=60 \
+            -o Acquire::https::Timeout=60 \
+            install -y sshpass socat curl jq qemu-system-x86 ovmf unzip
 
       - name: Resolve artifact names
         id: meta
@@ -50,7 +148,13 @@ jobs:
             fi
           else
             if [ -z "$run_id" ]; then
-              run_id="$(gh run list --workflow ci.yml --branch main --limit 1 --json databaseId --jq '.[0].databaseId')"
+              run_id="$(gh api --paginate \
+                "repos/${{ github.repository }}/actions/workflows/ci.yml/runs?branch=main&event=push&status=completed&per_page=100" \
+                --jq '.workflow_runs[] | select(.conclusion=="success") | .id' | head -n 1)"
+              if [ -z "$run_id" ] || [ "$run_id" = "null" ]; then
+                echo "No successful completed CI run found on main" >&2
+                exit 1
+              fi
             fi
             artifact_name="$(gh api \
               repos/${{ github.repository }}/actions/runs/${run_id}/artifacts \
@@ -93,6 +197,9 @@ jobs:
             resolved_version="$(awk -F'"' '/^LANDSCAPE_VERSION=/{print $2; exit}' build.env)"
           fi
           echo "test_landscape_version=$resolved_version" >> "$GITHUB_ENV"
+          if [ -f output/metadata/effective-landscape_init.toml ]; then
+            cp output/metadata/effective-landscape_init.toml output/test-logs/effective-landscape_init.toml
+          fi
 
       - name: List outputs
         run: ls -lh output/
@@ -102,6 +209,10 @@ jobs:
           LANDSCAPE_TEST_VARIANT: ${{ matrix.variant }}
           LANDSCAPE_TEST_ARTIFACT_ID: ${{ steps.meta.outputs.artifact_id }}
           LANDSCAPE_TEST_LANDSCAPE_VERSION: ${{ env.test_landscape_version }}
+          LANDSCAPE_EFFECTIVE_INIT_CONFIG: output/metadata/effective-landscape_init.toml
+          SSH_PASSWORD: ${{ steps.creds.outputs.ssh_password }}
+          API_USERNAME: ${{ steps.creds.outputs.api_username }}
+          API_PASSWORD: ${{ steps.creds.outputs.api_password }}
         run: timeout --foreground 20m ./tests/test-readiness.sh output/*.img
 
       - name: Run dataplane tests (${{ matrix.variant }})
@@ -109,6 +220,10 @@ jobs:
           LANDSCAPE_TEST_VARIANT: ${{ matrix.variant }}
           LANDSCAPE_TEST_ARTIFACT_ID: ${{ steps.meta.outputs.artifact_id }}
           LANDSCAPE_TEST_LANDSCAPE_VERSION: ${{ env.test_landscape_version }}
+          LANDSCAPE_EFFECTIVE_INIT_CONFIG: output/metadata/effective-landscape_init.toml
+          SSH_PASSWORD: ${{ steps.creds.outputs.ssh_password }}
+          API_USERNAME: ${{ steps.creds.outputs.api_username }}
+          API_PASSWORD: ${{ steps.creds.outputs.api_password }}
         run: timeout --foreground 25m ./tests/test-dataplane.sh output/*.img
 
       - name: Upload test logs

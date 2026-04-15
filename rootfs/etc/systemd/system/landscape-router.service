@@ -3,7 +3,7 @@ Description=Landscape Router
 After=local-fs.target
 
 [Service]
-ExecStart=/bin/bash -c 'if [ ! -f /root/.landscape-router/landscape_init.toml ]; then exec /root/landscape-webserver --auto; else exec /root/landscape-webserver; fi'
+ExecStart=/bin/bash -c 'set -a; [ -f /etc/landscape/runtime.env ] && . /etc/landscape/runtime.env; set +a; if [ ! -f /root/.landscape-router/landscape_init.toml ]; then exec /root/landscape-webserver --auto; else exec /root/landscape-webserver; fi'
 Restart=always
 User=root
 LimitMEMLOCK=infinity

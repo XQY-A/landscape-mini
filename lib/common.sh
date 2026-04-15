@@ -202,12 +202,13 @@ phase_install_landscape() {
     unzip -o "${ROOTFS_DIR}/root/.landscape-router/static.zip" -d "${ROOTFS_DIR}/root/.landscape-router/"
     rm -f "${ROOTFS_DIR}/root/.landscape-router/static.zip"
 
-    # Copy landscape_init.toml if it exists in configs/
-    if [[ -f "${SCRIPT_DIR}/configs/landscape_init.toml" ]]; then
-        echo "  Installing landscape_init.toml ..."
-        cp "${SCRIPT_DIR}/configs/landscape_init.toml" "${ROOTFS_DIR}/root/.landscape-router/landscape_init.toml"
+    # Copy effective landscape_init.toml when available, otherwise fall back to repo default.
+    local landscape_init_source="${EFFECTIVE_CONFIG_PATH:-${SCRIPT_DIR}/configs/landscape_init.toml}"
+    if [[ -f "${landscape_init_source}" ]]; then
+        echo "  Installing landscape_init.toml from ${landscape_init_source} ..."
+        cp "${landscape_init_source}" "${ROOTFS_DIR}/root/.landscape-router/landscape_init.toml"
     else
-        echo "  [SKIP] No configs/landscape_init.toml found (will use --auto mode)."
+        echo "  [SKIP] No landscape_init.toml found (will use --auto mode)."
     fi
 
     # Copy sysctl config
@@ -219,6 +220,15 @@ phase_install_landscape() {
     else
         echo "  [SKIP] No rootfs/etc/sysctl.d/99-landscape.conf found."
     fi
+
+    # Copy build runtime environment for non-topology settings.
+    echo "  Writing runtime environment ..."
+    mkdir -p "${ROOTFS_DIR}/etc/landscape"
+    cat > "${ROOTFS_DIR}/etc/landscape/runtime.env" <<EOF
+LANDSCAPE_ADMIN_USER=${LANDSCAPE_ADMIN_USER}
+LANDSCAPE_ADMIN_PASS=${LANDSCAPE_ADMIN_PASS}
+EOF
+    chmod 600 "${ROOTFS_DIR}/etc/landscape/runtime.env"
 
     # Install expand-rootfs script
     echo "  Installing expand-rootfs script ..."

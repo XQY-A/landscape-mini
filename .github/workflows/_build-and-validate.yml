@@ -1,0 +1,279 @@
+name: Build and Validate Variant
+
+on:
+  workflow_call:
+    inputs:
+      variant:
+        required: true
+        type: string
+      build_flags:
+        required: false
+        type: string
+        default: ""
+      run_e2e:
+        required: false
+        type: boolean
+        default: true
+      landscape_version:
+        required: false
+        type: string
+        default: ""
+      config_profile:
+        required: false
+        type: string
+        default: "default"
+      topology_source:
+        required: false
+        type: string
+        default: "default"
+      lan_server_ip:
+        required: false
+        type: string
+        default: ""
+      lan_range_start:
+        required: false
+        type: string
+        default: ""
+      lan_range_end:
+        required: false
+        type: string
+        default: ""
+      lan_netmask:
+        required: false
+        type: string
+        default: ""
+      root_password:
+        required: false
+        type: string
+        default: "landscape"
+      root_password_source:
+        required: false
+        type: string
+        default: "default"
+      api_username:
+        required: false
+        type: string
+        default: "root"
+      api_username_source:
+        required: false
+        type: string
+        default: "default"
+      api_password:
+        required: false
+        type: string
+        default: "root"
+      api_password_source:
+        required: false
+        type: string
+        default: "default"
+      image_retention_days:
+        required: false
+        type: number
+        default: 30
+      log_retention_days:
+        required: false
+        type: number
+        default: 7
+
+env:
+  TEST_LOG_DIR: output/test-logs
+
+jobs:
+  build-and-validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve validation metadata
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          requested_version="${{ inputs.landscape_version }}"
+          resolved_version="$requested_version"
+          if [ -z "$resolved_version" ]; then
+            resolved_version="$(awk -F'"' '/^LANDSCAPE_VERSION=/{print $2; exit}' build.env)"
+          fi
+          artifact_id="${{ inputs.variant }}-${resolved_version}-${GITHUB_SHA::12}-${GITHUB_RUN_ID}"
+          {
+            echo "resolved_version=$resolved_version"
+            echo "artifact_id=$artifact_id"
+            echo "image_artifact=landscape-mini-x86-${artifact_id}"
+            echo "log_artifact=test-logs-${artifact_id}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Render effective topology config
+        env:
+          LANDSCAPE_LAN_SERVER_IP: ${{ inputs.lan_server_ip }}
+          LANDSCAPE_LAN_RANGE_START: ${{ inputs.lan_range_start }}
+          LANDSCAPE_LAN_RANGE_END: ${{ inputs.lan_range_end }}
+          LANDSCAPE_LAN_NETMASK: ${{ inputs.lan_netmask }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p output/metadata
+          bash .github/scripts/render-effective-topology.sh output/metadata/effective-landscape_init.toml
+
+      - name: Maximize build space
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /usr/local/share/boost
+          sudo rm -rf "$AGENT_TOOLSDIRECTORY"
+          df -h
+
+      - name: Install dependencies
+        timeout-minutes: 10
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          apt_retry() {
+            local attempt
+            for attempt in 1 2 3; do
+              if "$@"; then
+                return 0
+              fi
+              if [ "$attempt" -eq 3 ]; then
+                echo "Command failed after ${attempt} attempts: $*" >&2
+                return 1
+              fi
+              echo "Command failed on attempt ${attempt}, retrying: $*" >&2
+            done
+          }
+
+          apt_retry sudo apt-get \
+            -o Acquire::Retries=3 \
+            -o Acquire::http::Timeout=60 \
+            -o Acquire::https::Timeout=60 \
+            update
+
+          apt_retry sudo apt-get \
+            -o Acquire::Retries=3 \
+            -o Acquire::http::Timeout=60 \
+            -o Acquire::https::Timeout=60 \
+            install -y debootstrap parted dosfstools e2fsprogs \
+            grub-efi-amd64-bin grub-pc-bin qemu-utils rsync curl \
+            sshpass socat jq qemu-system-x86 ovmf
+
+      - name: Build image (${{ inputs.variant }})
+        env:
+          RESOLVED_VERSION: ${{ steps.meta.outputs.resolved_version }}
+          EFFECTIVE_CONFIG_PATH: ${{ github.workspace }}/output/metadata/effective-landscape_init.toml
+          EFFECTIVE_CONFIG_PROFILE: ${{ inputs.config_profile }}
+          EFFECTIVE_TOPOLOGY_SOURCE: ${{ inputs.topology_source }}
+          ROOT_PASSWORD: ${{ inputs.root_password }}
+          ROOT_PASSWORD_SOURCE: ${{ inputs.root_password_source }}
+          LANDSCAPE_ADMIN_USER: ${{ inputs.api_username }}
+          LANDSCAPE_ADMIN_USER_SOURCE: ${{ inputs.api_username_source }}
+          LANDSCAPE_ADMIN_PASS: ${{ inputs.api_password }}
+          LANDSCAPE_ADMIN_PASS_SOURCE: ${{ inputs.api_password_source }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version_flag=()
+          if [ -n "${RESOLVED_VERSION}" ]; then
+            version_flag=(--version "${RESOLVED_VERSION}")
+          fi
+          sudo APT_MIRROR="" ALPINE_MIRROR="" OUTPUT_FORMAT=img COMPRESS_OUTPUT=no \
+            EFFECTIVE_CONFIG_PATH="${EFFECTIVE_CONFIG_PATH}" \
+            EFFECTIVE_CONFIG_PROFILE="${EFFECTIVE_CONFIG_PROFILE}" \
+            EFFECTIVE_TOPOLOGY_SOURCE="${EFFECTIVE_TOPOLOGY_SOURCE}" \
+            ROOT_PASSWORD="${ROOT_PASSWORD}" \
+            ROOT_PASSWORD_SOURCE="${ROOT_PASSWORD_SOURCE}" \
+            LANDSCAPE_ADMIN_USER="${LANDSCAPE_ADMIN_USER}" \
+            LANDSCAPE_ADMIN_USER_SOURCE="${LANDSCAPE_ADMIN_USER_SOURCE}" \
+            LANDSCAPE_ADMIN_PASS="${LANDSCAPE_ADMIN_PASS}" \
+            LANDSCAPE_ADMIN_PASS_SOURCE="${LANDSCAPE_ADMIN_PASS_SOURCE}" \
+            ./build.sh "${version_flag[@]}" ${{ inputs.build_flags }}
+
+      - name: Fix output permissions
+        run: sudo chown -R "$(id -u):$(id -g)" output/ work/
+
+      - name: Capture artifact metadata
+        env:
+          RESOLVED_VERSION: ${{ steps.meta.outputs.resolved_version }}
+          ARTIFACT_ID: ${{ steps.meta.outputs.artifact_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p output/metadata "${TEST_LOG_DIR}"
+          image_file="$(ls output/*.img)"
+          image_base="$(basename "$image_file")"
+          printf '%s\n' \
+            "variant=${{ inputs.variant }}" \
+            "resolved_version=${RESOLVED_VERSION}" \
+            "artifact_id=${ARTIFACT_ID}" \
+            "git_sha=${GITHUB_SHA}" \
+            "run_id=${GITHUB_RUN_ID}" \
+            "workflow=${GITHUB_WORKFLOW}" \
+            "image_file=${image_base}" \
+            "config_profile=${{ inputs.config_profile }}" \
+            "topology_source=${{ inputs.topology_source }}" \
+            "root_password_source=${{ inputs.root_password_source }}" \
+            "api_username_source=${{ inputs.api_username_source }}" \
+            "api_password_source=${{ inputs.api_password_source }}" \
+            "api_username=${{ inputs.api_username }}" \
+            > output/metadata/build-metadata.txt
+          cp output/metadata/build-metadata.txt "${TEST_LOG_DIR}/build-metadata.txt"
+
+      - name: List outputs
+        run: ls -lh output/
+
+      - name: Upload image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.meta.outputs.image_artifact }}
+          path: |
+            output/*.img
+            output/metadata/build-metadata.txt
+            output/metadata/effective-landscape_init.toml
+          retention-days: ${{ inputs.image_retention_days }}
+
+      - name: Run readiness checks (${{ inputs.variant }})
+        env:
+          LANDSCAPE_TEST_VARIANT: ${{ inputs.variant }}
+          LANDSCAPE_TEST_ARTIFACT_ID: ${{ steps.meta.outputs.artifact_id }}
+          LANDSCAPE_TEST_LANDSCAPE_VERSION: ${{ steps.meta.outputs.resolved_version }}
+          LANDSCAPE_EFFECTIVE_INIT_CONFIG: output/metadata/effective-landscape_init.toml
+          SSH_PASSWORD: ${{ inputs.root_password }}
+          API_USERNAME: ${{ inputs.api_username }}
+          API_PASSWORD: ${{ inputs.api_password }}
+        run: timeout --foreground 20m ./tests/test-readiness.sh output/*.img
+
+      - name: Run dataplane tests (${{ inputs.variant }})
+        if: ${{ inputs.run_e2e }}
+        env:
+          LANDSCAPE_TEST_VARIANT: ${{ inputs.variant }}
+          LANDSCAPE_TEST_ARTIFACT_ID: ${{ steps.meta.outputs.artifact_id }}
+          LANDSCAPE_TEST_LANDSCAPE_VERSION: ${{ steps.meta.outputs.resolved_version }}
+          LANDSCAPE_EFFECTIVE_INIT_CONFIG: output/metadata/effective-landscape_init.toml
+          SSH_PASSWORD: ${{ inputs.root_password }}
+          API_USERNAME: ${{ inputs.api_username }}
+          API_PASSWORD: ${{ inputs.api_password }}
+        run: timeout --foreground 25m ./tests/test-dataplane.sh output/*.img
+
+      - name: Mark E2E not scheduled for this variant
+        if: ${{ !inputs.run_e2e }}
+        env:
+          ARTIFACT_ID: ${{ steps.meta.outputs.artifact_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "${TEST_LOG_DIR}"
+          printf '%s\n' \
+            "variant=${{ inputs.variant }}" \
+            "artifact_id=${ARTIFACT_ID}" \
+            "reason=E2E reserved for representative coverage only" \
+            > "${TEST_LOG_DIR}/e2e-skipped.txt"
+
+      - name: Upload validation logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.meta.outputs.log_artifact }}
+          path: output/test-logs/
+          retention-days: ${{ inputs.log_retention_days }}

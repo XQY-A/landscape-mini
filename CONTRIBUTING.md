@@ -90,9 +90,9 @@ chore: release v0.2.3
 
 ## 发版流程
 
-本仓库的正确发版顺序：
+本仓库当前的正确发版顺序：
 
-**main 可发布 → 整理 changelog → release commit → push main → 打 tag → push tag**
+**main 可发布 → 整理 changelog → release commit → push main → 等对应 CI 成功 → 打 tag → push tag → promotion release**
 
 示例：
 
@@ -106,15 +106,25 @@ git add CHANGELOG.md
 git commit -m "chore: release v0.2.3"
 git push origin main
 
+# 等 main 上该 commit 的 ci.yml 成功
 git tag v0.2.3
 git push origin v0.2.3
 ```
+
+`release.yml` 现在只会：
+- 查找 tag 指向 commit 在 `main` 上对应的成功 `ci.yml` run
+- 下载那次 CI 已验证的 4 个 variant artifacts
+- 校验 metadata / git SHA / variant 完整性
+- 压缩 `.img` 并创建 GitHub Release
+
+它**不会**在 tag 触发时重新构建镜像。
 
 不要这样做：
 
 - 先打 tag，再补 release commit
 - 先 push tag，再改 `CHANGELOG.md`
 - 把上游 Landscape 版本当作本仓库 release 版本
+- 期待 release workflow 在没有对应成功 CI run 时自动重建
 
 ## 版本号说明
 

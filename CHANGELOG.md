@@ -8,6 +8,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added / 新增
+
+- Add fork-friendly `custom-build.yml` with high-value topology and credential inputs, plus explicit plaintext credential acknowledgement and secrets-first guidance / 新增面向 fork 用户的 `custom-build.yml`，支持高价值网络与凭据输入，并加入明文凭据确认和 secrets 优先指引
+
+### Changed / 变更
+
+- Rework CI around a reusable single-variant build-and-validate workflow, ship effective topology config inside artifacts, and let tests consume artifact-carried config plus injected credentials / 将 CI 重构为可复用的单变体构建验证流程，把 effective topology 配置随 artifact 一起发布，并让测试使用 artifact 自带配置与注入凭据
+- Promote GitHub releases from already-validated CI artifacts instead of rebuilding on tag pushes / 将 GitHub Release 改为基于已验证的 CI artifact 做 promotion，不再在 tag 推送时重新构建
+
+### Fixed / 修复
+
+- Stop hardcoding test SSH/API credentials so custom builds and retests can validate non-default passwords consistently / 移除测试中对 SSH/API 凭据的硬编码，使自定义构建与复测能够稳定验证非默认密码
+
 ## [0.2.6] - 2026-04-14
 
 ### Fixed / 修复
