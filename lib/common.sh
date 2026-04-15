@@ -973,6 +973,12 @@ phase_cleanup_and_shrink() {
     output_format_requested vmdk && export_vmdk
     output_format_requested pve-ova && export_pve_ova
 
+    if [[ "${COMPRESS_OUTPUT}" == "yes" ]]; then
+        echo "  Compressing raw image with gzip ..."
+        gzip -k -f "${IMAGE_FILE}"
+        echo "  Compressed: ${IMAGE_FILE}.gz"
+    fi
+
     write_local_build_metadata
 
     echo "  Phase 7 complete."
@@ -992,6 +998,12 @@ phase_report() {
         local IMG_SIZE
         IMG_SIZE=$(du -h "${IMAGE_FILE}" | awk '{print $1}')
         echo "  RAW image : ${IMAGE_FILE} (${IMG_SIZE})"
+    fi
+
+    if [[ -f "${IMAGE_FILE}.gz" ]]; then
+        local IMG_GZ_SIZE
+        IMG_GZ_SIZE=$(du -h "${IMAGE_FILE}.gz" | awk '{print $1}')
+        echo "  Compressed: ${IMAGE_FILE}.gz (${IMG_GZ_SIZE})"
     fi
 
     if [[ -f "${VMDK_FILE}" ]]; then
