@@ -104,31 +104,190 @@ ${script}"
 }
 
 # ---------------------------------------------------------------------------
-# Helper: probe URL health and latency
+# Helper: measure URL download health and speed
 # ---------------------------------------------------------------------------
 probe_url() {
     local url="$1"
     local timeout_seconds="${2:-5}"
+    local sample_bytes="${3:-5242880}"
     local output
     local curl_exit=0
-    local http_code time_total
+    local http_code size_download speed_download
 
     output=$(curl -fsSLo /dev/null \
         --connect-timeout "${timeout_seconds}" \
         --max-time "${timeout_seconds}" \
-        --write-out '%{http_code} %{time_total}' \
+        --range "0-$((sample_bytes - 1))" \
+        --write-out '%{http_code} %{size_download} %{speed_download}' \
         "$url" 2>/dev/null) || curl_exit=$?
 
     if [[ "${curl_exit}" -ne 0 || -z "${output}" ]]; then
         return 1
     fi
 
-    read -r http_code time_total <<< "${output}"
-    if [[ "${http_code}" != "200" ]]; then
+    read -r http_code size_download speed_download <<< "${output}"
+    if [[ "${http_code}" != "200" && "${http_code}" != "206" ]]; then
         return 1
     fi
 
-    printf '%s\n' "${time_total}"
+    if ! awk "BEGIN {exit !(${size_download} > 0 && ${speed_download} > 0)}"; then
+        return 1
+    fi
+
+    printf '%s\n' "${speed_download}"
+}
+
+# ---------------------------------------------------------------------------
+# Helper: extract median value from newline-delimited numeric samples
+# ---------------------------------------------------------------------------
+median_speed() {
+    awk '
+        { values[count++] = $1 }
+        END {
+            if (count == 0) {
+                exit 1
+            }
+            for (i = 0; i < count; i++) {
+                for (j = i + 1; j < count; j++) {
+                    if (values[i] > values[j]) {
+                        tmp = values[i]
+                        values[i] = values[j]
+                        values[j] = tmp
+                    }
+                }
+            }
+            print values[int(count / 2)]
+        }
+    '
+}
+
+# ---------------------------------------------------------------------------
+# Helper: extract first package path from Debian-style Packages content
+# ---------------------------------------------------------------------------
+extract_debian_package_path() {
+    awk '
+        /^Filename: / && first == "" { first = $2 }
+        END {
+            if (first != "") {
+                print first
+            } else {
+                exit 1
+            }
+        }
+    '
+}
+
+# ---------------------------------------------------------------------------
+# Helper: derive a representative Debian package URL from Packages index
+# ---------------------------------------------------------------------------
+derive_debian_package_url() {
+    local candidate="$1"
+    local packages_suffix="$2"
+    local timeout_seconds="${3:-5}"
+    local packages_url="${candidate%/}${packages_suffix}"
+    local index_file
+    local package_path
+
+    index_file=$(mktemp)
+    if ! curl -fsSL \
+        --connect-timeout "${timeout_seconds}" \
+        --max-time "$((timeout_seconds * 4))" \
+        -o "${index_file}" \
+        "$packages_url" 2>/dev/null; then
+        rm -f "${index_file}"
+        return 1
+    fi
+
+    package_path=$(xz -dc "${index_file}" 2>/dev/null | extract_debian_package_path)
+    rm -f "${index_file}"
+
+    if [[ -z "${package_path}" ]]; then
+        return 1
+    fi
+
+    printf '%s/%s\n' "${candidate%/}" "${package_path#/}"
+}
+
+# ---------------------------------------------------------------------------
+# Helper: derive a representative Alpine package URL from APKINDEX
+# ---------------------------------------------------------------------------
+derive_alpine_package_url() {
+    local candidate="$1"
+    local repo_prefix="$2"
+    local timeout_seconds="${3:-5}"
+    local index_url="${candidate%/}${repo_prefix}/APKINDEX.tar.gz"
+    local index_file
+    local package_file
+
+    index_file=$(mktemp)
+    if ! curl -fsSL \
+        --connect-timeout "${timeout_seconds}" \
+        --max-time "${timeout_seconds}" \
+        -o "${index_file}" \
+        "$index_url" 2>/dev/null; then
+        rm -f "${index_file}"
+        return 1
+    fi
+
+    package_file=$(tar -xOzf "${index_file}" 2>/dev/null | awk -F: '
+        /^P:/ && pkg == "" { pkg=$2 }
+        /^V:/ && ver == "" && pkg != "" { ver=$2 }
+        END {
+            if (pkg != "" && ver != "") {
+                print pkg "-" ver ".apk"
+            } else {
+                exit 1
+            }
+        }
+    ')
+    rm -f "${index_file}"
+
+    if [[ -z "${package_file}" ]]; then
+        return 1
+    fi
+
+    printf '%s%s/%s\n' "${candidate%/}" "${repo_prefix}" "${package_file}"
+}
+
+# ---------------------------------------------------------------------------
+# Helper: derive a representative Debian package URL from plain-text Packages index
+# ---------------------------------------------------------------------------
+derive_plain_debian_package_url() {
+    local candidate="$1"
+    local packages_suffix="$2"
+    local timeout_seconds="${3:-5}"
+    local packages_url="${candidate%/}${packages_suffix}"
+    local index_file
+    local package_path
+
+    index_file=$(mktemp)
+    if ! curl -fsSL \
+        --connect-timeout "${timeout_seconds}" \
+        --max-time "$((timeout_seconds * 4))" \
+        -o "${index_file}" \
+        "$packages_url" 2>/dev/null; then
+        rm -f "${index_file}"
+        return 1
+    fi
+
+    package_path=$(extract_debian_package_path < "${index_file}")
+    rm -f "${index_file}"
+
+    if [[ -z "${package_path}" ]]; then
+        return 1
+    fi
+
+    printf '%s/%s\n' "${candidate%/}" "${package_path#/}"
+}
+
+# ---------------------------------------------------------------------------
+# Helper: derive a representative direct URL
+# ---------------------------------------------------------------------------
+derive_direct_probe_url() {
+    local candidate="$1"
+    local probe_target="$2"
+
+    printf '%s%s\n' "${candidate%/}" "${probe_target}"
 }
 
 # ---------------------------------------------------------------------------
@@ -137,23 +296,70 @@ probe_url() {
 select_best_source() {
     local source_name="$1"
     local candidates="$2"
-    local probe_suffix="$3"
-    local timeout_seconds="${4:-5}"
+    local probe_mode="$3"
+    local probe_target="$4"
+    local timeout_seconds="${5:-5}"
+    local sample_bytes="${6:-1048576}"
+    local probe_attempts="${7:-3}"
     local best_candidate=""
-    local best_time=""
-    local candidate probe_url_value measured_time
+    local best_speed=""
+    local candidate representative_url measured_speed median_value samples attempt
 
     for candidate in ${candidates}; do
-        probe_url_value="${candidate%/}${probe_suffix}"
-        echo "  Probing ${source_name}: ${probe_url_value}" >&2
-        if measured_time=$(probe_url "${probe_url_value}" "${timeout_seconds}"); then
-            echo "  [OK] ${source_name}: ${candidate} (${measured_time}s)" >&2
-            if [[ -z "${best_candidate}" ]] || awk "BEGIN {exit !(${measured_time} < ${best_time})}"; then
-                best_candidate="${candidate}"
-                best_time="${measured_time}"
+        case "${probe_mode}" in
+            direct)
+                representative_url=$(derive_direct_probe_url "${candidate}" "${probe_target}")
+                ;;
+            debian-package)
+                representative_url=$(derive_debian_package_url "${candidate}" "${probe_target}" "${timeout_seconds}") || {
+                    echo "  [SKIP] ${source_name}: ${candidate}" >&2
+                    continue
+                }
+                ;;
+            plain-debian-package)
+                representative_url=$(derive_plain_debian_package_url "${candidate}" "${probe_target}" "${timeout_seconds}") || {
+                    echo "  [SKIP] ${source_name}: ${candidate}" >&2
+                    continue
+                }
+                ;;
+            alpine-package)
+                representative_url=$(derive_alpine_package_url "${candidate}" "${probe_target}" "${timeout_seconds}") || {
+                    echo "  [SKIP] ${source_name}: ${candidate}" >&2
+                    continue
+                }
+                ;;
+            *)
+                echo "ERROR: Unknown probe mode '${probe_mode}' for ${source_name}." >&2
+                return 1
+                ;;
+        esac
+
+        samples=""
+        echo "  Probing ${source_name}: ${representative_url}" >&2
+        for attempt in $(seq 1 "${probe_attempts}"); do
+            if measured_speed=$(probe_url "${representative_url}" "${timeout_seconds}" "${sample_bytes}"); then
+                samples+="${measured_speed}"$'\n'
+                echo "    attempt ${attempt}/${probe_attempts}: ${measured_speed} B/s" >&2
+            else
+                echo "  [SKIP] ${source_name}: ${candidate} (attempt ${attempt}/${probe_attempts})" >&2
+                samples=""
+                break
             fi
-        else
+        done
+
+        if [[ -z "${samples}" ]]; then
+            continue
+        fi
+
+        median_value=$(printf '%s' "${samples}" | median_speed) || {
             echo "  [SKIP] ${source_name}: ${candidate}" >&2
+            continue
+        }
+
+        echo "  [OK] ${source_name}: ${candidate} (median ${median_value} B/s)" >&2
+        if [[ -z "${best_candidate}" ]] || awk "BEGIN {exit !(${median_value} > ${best_speed})}"; then
+            best_candidate="${candidate}"
+            best_speed="${median_value}"
         fi
     done
 
@@ -171,10 +377,13 @@ resolve_source() {
     local source_name="$1"
     local explicit_value="$2"
     local candidates="$3"
-    local probe_suffix="$4"
-    local resolved_var_name="$5"
-    local source_origin_var_name="$6"
-    local timeout_seconds="${7:-5}"
+    local probe_mode="$4"
+    local probe_target="$5"
+    local resolved_var_name="$6"
+    local source_origin_var_name="$7"
+    local timeout_seconds="${8:-5}"
+    local sample_bytes="${9:-5242880}"
+    local probe_attempts="${10:-3}"
     local resolved_value
 
     if [[ -n "${explicit_value}" ]]; then
@@ -184,7 +393,7 @@ resolve_source() {
         return 0
     fi
 
-    if ! resolved_value=$(select_best_source "${source_name}" "${candidates}" "${probe_suffix}" "${timeout_seconds}"); then
+    if ! resolved_value=$(select_best_source "${source_name}" "${candidates}" "${probe_mode}" "${probe_target}" "${timeout_seconds}" "${sample_bytes}" "${probe_attempts}"); then
         echo "ERROR: No healthy ${source_name} candidates found." >&2
         return 1
     fi
@@ -193,7 +402,6 @@ resolve_source() {
     printf -v "${source_origin_var_name}" '%s' "probed"
     echo "  Selected ${source_name}: ${resolved_value}"
 }
-
 
 # ---------------------------------------------------------------------------
 # Helper: mount special filesystems for chroot

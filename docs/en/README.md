@@ -178,7 +178,7 @@ The workflow records the **credential source** for each field in `build-metadata
 
 Notes:
 - If `APT_MIRROR` / `ALPINE_MIRROR` / `DOCKER_APT_MIRROR` / `DOCKER_APT_GPG_URL` are explicitly set, the build uses them directly
-- If the explicit variables are empty, the build probes the corresponding candidate lists and picks a healthy source, preferring faster healthy candidates
+- If the explicit variables are empty, the build probes the corresponding candidate lists and picks a healthy source, preferring the one with faster median representative download speed
 - If all candidates fail, the build exits early before expensive install phases begin
 - Debian Docker builds use the resolved Docker APT mirror and GPG URL
 - Alpine Docker packages still follow the resolved Alpine mirror, so no separate Alpine Docker mirror variable is needed

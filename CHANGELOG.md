@@ -20,7 +20,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Fixed / 修复
 
 - Switch image default DNS resolver to `1.1.1.1` while keeping build-time DNS aligned with the active build environment, so CI stays resilient without breaking resumed/offline-friendly workflows / 将镜像默认 DNS 解析器切换为 `1.1.1.1`，同时让构建阶段 DNS 跟随当前构建环境，既增强 CI 稳定性，又避免破坏恢复构建/离线友好流程
-- Add multi-source probing and early-fail mirror resolution so local builds and GitHub CI can select healthy package sources automatically when explicit mirrors are not set, while preserving `--skip-to` source provenance on resumed builds / 新增多源探测与早失败镜像源解析逻辑，使本地构建与 GitHub CI 在未显式指定镜像源时可自动选择健康可用的软件源，并在恢复构建时保留 `--skip-to` 的源 provenance
+- Add multi-source probing and early-fail mirror resolution so local builds and GitHub CI can select healthy package sources automatically when explicit mirrors are not set, while preserving `--skip-to` source provenance on resumed builds and preferring representative download throughput over raw latency / 新增多源探测与早失败镜像源解析逻辑，使本地构建与 GitHub CI 在未显式指定镜像源时可自动选择健康可用的软件源，在恢复构建时保留 `--skip-to` 的源 provenance，并优先参考代表性下载吞吐而非仅看延迟
 - Let CI inherit configurable Docker mirror settings while making chroot retry steps fail fast on command errors / 让 CI 继承可配置的 Docker 镜像源设置，并让 chroot 重试步骤在命令失败时立即终止
 - Add configurable Debian Docker source settings and retry transient package/network operations during image builds to reduce CI failures from upstream mirror instability / 为 Debian Docker 构建增加可配置的软件源设置，并对镜像构建中的易失败网络/包管理步骤增加重试，降低上游源抖动导致的 CI 失败
 - Retry Debian and Alpine Docker package installation steps during image builds so transient upstream network failures are less likely to fail CI / 在镜像构建期间为 Debian 和 Alpine 的 Docker 安装步骤增加重试，降低上游网络瞬时故障导致 CI 失败的概率

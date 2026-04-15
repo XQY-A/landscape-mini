@@ -131,7 +131,8 @@ resolve_build_sources() {
             "Debian APT mirror" \
             "${APT_MIRROR}" \
             "${APT_MIRROR_CANDIDATES}" \
-            "/dists/${DEBIAN_RELEASE}/InRelease" \
+            "debian-package" \
+            "/dists/${DEBIAN_RELEASE}/main/binary-amd64/Packages.xz" \
             "RESOLVED_APT_MIRROR" \
             "RESOLVED_APT_MIRROR_SOURCE" \
             "${SOURCE_PROBE_TIMEOUT}"
@@ -142,7 +143,8 @@ resolve_build_sources() {
             "Alpine mirror" \
             "${ALPINE_MIRROR}" \
             "${ALPINE_MIRROR_CANDIDATES}" \
-            "/${ALPINE_RELEASE}/main/x86_64/APKINDEX.tar.gz" \
+            "alpine-package" \
+            "/${ALPINE_RELEASE}/main/x86_64" \
             "RESOLVED_ALPINE_MIRROR" \
             "RESOLVED_ALPINE_MIRROR_SOURCE" \
             "${SOURCE_PROBE_TIMEOUT}"
@@ -155,7 +157,8 @@ resolve_build_sources() {
             "Docker APT mirror" \
             "${DOCKER_APT_MIRROR}" \
             "${DOCKER_APT_MIRROR_CANDIDATES}" \
-            "/dists/${DEBIAN_RELEASE}/InRelease" \
+            "plain-debian-package" \
+            "/dists/${DEBIAN_RELEASE}/stable/binary-amd64/Packages" \
             "RESOLVED_DOCKER_APT_MIRROR" \
             "RESOLVED_DOCKER_APT_MIRROR_SOURCE" \
             "${SOURCE_PROBE_TIMEOUT}"
@@ -164,6 +167,7 @@ resolve_build_sources() {
             "Docker APT GPG URL" \
             "${DOCKER_APT_GPG_URL}" \
             "${DOCKER_APT_GPG_URL_CANDIDATES}" \
+            "direct" \
             "" \
             "RESOLVED_DOCKER_APT_GPG_URL" \
             "RESOLVED_DOCKER_APT_GPG_URL_SOURCE" \
