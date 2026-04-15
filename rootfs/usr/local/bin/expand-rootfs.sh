@@ -2,22 +2,128 @@
 # Expand root partition to fill the entire disk
 # All operations are idempotent — exits in milliseconds if no expansion needed
 
-set -e
+set -eu
 
-ROOT_PART=$(findmnt -n -o SOURCE /)
-ROOT_DISK="/dev/$(lsblk -n -o PKNAME "${ROOT_PART}" | head -1)"
-PART_NUM="${ROOT_PART##*[!0-9]}"
+log() {
+    echo "expand-rootfs: $*"
+}
+
+warn() {
+    echo "expand-rootfs: $*" >&2
+}
+
+get_block_device_size() {
+    if command -v blockdev >/dev/null 2>&1; then
+        blockdev --getsize64 "$1" 2>/dev/null
+        return
+    fi
+
+    lsblk -bnro SIZE "$1" 2>/dev/null | head -1
+}
+
+try_reread_partition_table() {
+    if command -v partprobe >/dev/null 2>&1; then
+        partprobe "$ROOT_DISK" 2>/dev/null || true
+    fi
+
+    if command -v udevadm >/dev/null 2>&1; then
+        udevadm settle 2>/dev/null || true
+    fi
+}
+
+ROOT_PART=$(lsblk -pnro NAME,MOUNTPOINT | while read -r name mountpoint; do
+    if [ "$mountpoint" = "/" ]; then
+        printf '%s\n' "$name"
+        break
+    fi
+done)
+
+if [ -z "$ROOT_PART" ]; then
+    ROOT_SOURCE=$(findmnt -n -o SOURCE / 2>/dev/null || true)
+    case "$ROOT_SOURCE" in
+        /dev/*)
+            ROOT_PART="$ROOT_SOURCE"
+            ;;
+        *)
+            warn "could not resolve block device for / (source: ${ROOT_SOURCE:-unknown})"
+            exit 1
+            ;;
+    esac
+fi
+
+ROOT_DISK_NAME=$(lsblk -nro PKNAME "$ROOT_PART" | head -1)
+PART_NUM=$(lsblk -nro PARTN "$ROOT_PART" | head -1)
+
+if [ -z "$ROOT_DISK_NAME" ] || [ -z "$PART_NUM" ]; then
+    warn "unsupported root device $ROOT_PART; expected a disk partition"
+    exit 1
+fi
+
+ROOT_DISK="/dev/$ROOT_DISK_NAME"
 
 # 1. Fix GPT backup header (required after dd'ing a small image to a larger disk)
 #    No-op if already fixed
-sgdisk -e "${ROOT_DISK}" 2>/dev/null || true
+SGDISK_OUTPUT=$(sgdisk -e "$ROOT_DISK" 2>&1 || true)
+if [ -n "$SGDISK_OUTPUT" ]; then
+    printf '%s\n' "$SGDISK_OUTPUT" >&2
+fi
+try_reread_partition_table
+
+ROOT_PART_SIZE_BEFORE=$(get_block_device_size "$ROOT_PART")
+if [ -z "$ROOT_PART_SIZE_BEFORE" ]; then
+    warn "could not determine current size of $ROOT_PART"
+    exit 1
+fi
 
 # 2. Expand partition (growpart auto-detects available space)
-#    Prints "NOCHANGE" and exits if no space available
-if growpart "${ROOT_DISK}" "${PART_NUM}"; then
-    # 3. Expand filesystem only if partition was actually expanded
-    resize2fs "${ROOT_PART}"
-    echo "expand-rootfs: root partition expanded"
+#    Distinguish true no-op from real failures
+set +e
+GROWPART_OUTPUT=$(growpart "$ROOT_DISK" "$PART_NUM" 2>&1)
+GROWPART_STATUS=$?
+set -e
+
+if [ -n "$GROWPART_OUTPUT" ]; then
+    if [ "$GROWPART_STATUS" -eq 0 ]; then
+        printf '%s\n' "$GROWPART_OUTPUT"
+    else
+        printf '%s\n' "$GROWPART_OUTPUT" >&2
+    fi
+fi
+
+PARTITION_CHANGED=yes
+case "$GROWPART_OUTPUT" in
+    *NOCHANGE:*)
+        PARTITION_CHANGED=no
+        ;;
+esac
+
+if [ "$GROWPART_STATUS" -ne 0 ] && [ "$PARTITION_CHANGED" != "no" ]; then
+    warn "failed to grow $ROOT_PART on $ROOT_DISK (exit $GROWPART_STATUS)"
+    exit "$GROWPART_STATUS"
+fi
+
+if [ "$PARTITION_CHANGED" = "yes" ]; then
+    try_reread_partition_table
+
+    ROOT_PART_SIZE_AFTER=$(get_block_device_size "$ROOT_PART")
+    if [ -z "$ROOT_PART_SIZE_AFTER" ]; then
+        warn "could not determine resized size of $ROOT_PART"
+        exit 1
+    fi
+
+    if [ "$ROOT_PART_SIZE_AFTER" -le "$ROOT_PART_SIZE_BEFORE" ]; then
+        warn "kernel has not recognized the new size of $ROOT_PART yet"
+        exit 1
+    fi
 else
-    echo "expand-rootfs: no expansion needed"
+    log "partition already fills disk; checking filesystem size"
+fi
+
+# 3. Expand filesystem if needed
+resize2fs "$ROOT_PART"
+
+if [ "$PARTITION_CHANGED" = "yes" ]; then
+    log "root partition expanded"
+else
+    log "filesystem checked against current partition size"
 fi
