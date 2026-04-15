@@ -87,9 +87,10 @@ backend_configure() {
     mount_chroot_fs
 
     # ---- DNS resolver (needed for apk to fetch packages) ----
-    echo "  Copying host resolv.conf for package installation ..."
-    cp /etc/resolv.conf "${ROOTFS_DIR}/etc/resolv.conf" 2>/dev/null || \
-        echo "nameserver 8.8.8.8" > "${ROOTFS_DIR}/etc/resolv.conf"
+    echo "  Writing /etc/resolv.conf for package installation ..."
+    cat > "${ROOTFS_DIR}/etc/resolv.conf" <<'EOF'
+nameserver 1.1.1.1
+EOF
 
     # ---- APK repositories ----
     echo "  Writing /etc/apk/repositories ..."
@@ -278,7 +279,7 @@ EOF
     # ---- DNS resolver ----
     echo "  Writing /etc/resolv.conf ..."
     rm -f "${ROOTFS_DIR}/etc/resolv.conf"
-    echo "nameserver 114.114.114.114" > "${ROOTFS_DIR}/etc/resolv.conf"
+    echo "nameserver 1.1.1.1" > "${ROOTFS_DIR}/etc/resolv.conf"
 
     # ---- Enable serial console (for QEMU testing) ----
     echo "  Enabling serial console ..."

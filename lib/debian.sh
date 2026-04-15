@@ -241,7 +241,7 @@ EOF
     # ---- DNS resolver ----
     echo "  Writing /etc/resolv.conf ..."
     rm -f "${ROOTFS_DIR}/etc/resolv.conf"
-    echo "nameserver 114.114.114.114" > "${ROOTFS_DIR}/etc/resolv.conf"
+    echo "nameserver 1.1.1.1" > "${ROOTFS_DIR}/etc/resolv.conf"
 
     echo "  Phase 4 complete."
 }

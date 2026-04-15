@@ -19,6 +19,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed / 修复
 
+- Switch build-time and image default DNS resolver settings to `1.1.1.1` so CI no longer depends on region-specific public DNS reachability / 将构建阶段和镜像默认 DNS 解析器统一切换为 `1.1.1.1`，避免 CI 依赖区域性公共 DNS 的可达性
 - Add multi-source probing and early-fail mirror resolution so local builds and GitHub CI can select healthy package sources automatically when explicit mirrors are not set / 新增多源探测与早失败镜像源解析逻辑，使本地构建与 GitHub CI 在未显式指定镜像源时可自动选择健康可用的软件源
 - Let CI inherit configurable Docker mirror settings while making chroot retry steps fail fast on command errors / 让 CI 继承可配置的 Docker 镜像源设置，并让 chroot 重试步骤在命令失败时立即终止
 - Add configurable Debian Docker source settings and retry transient package/network operations during image builds to reduce CI failures from upstream mirror instability / 为 Debian Docker 构建增加可配置的软件源设置，并对镜像构建中的易失败网络/包管理步骤增加重试，降低上游源抖动导致的 CI 失败
