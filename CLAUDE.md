@@ -11,6 +11,24 @@ Landscape Mini builds minimal x86 images for Landscape Router.
 - Build identity model: `base_system + include_docker + output_formats`
 - Upstream project: https://github.com/ThisSeanZhang/landscape
 
+## Start here
+
+Choose the path that matches the user’s goal:
+
+1. **Just wants to use the project**
+   - Chinese entry: `README.md`
+   - English entry: `docs/en/README.md`
+   - Custom Build guide: `docs/zh/custom-build.md`, `docs/en/custom-build.md`
+
+2. **Wants to modify the build system or tests**
+   - Main files: `build.sh`, `lib/`, `rootfs/`, `tests/`, `.github/workflows/`
+
+3. **Wants release / CI behavior**
+   - Read `.github/workflows/ci.yml`
+   - Read `.github/workflows/_build-and-validate.yml`
+   - Read `.github/workflows/test.yml`
+   - Read `.github/workflows/release.yml`
+
 ## Common Commands
 
 ```bash
@@ -28,6 +46,11 @@ make ssh
 ## Defaults and important inputs
 
 - Default upstream version comes from `build.env` (`LANDSCAPE_VERSION`, currently `v0.18.2`)
+- Default Linux login:
+  - `root` / `landscape`
+  - `ld` / `landscape`
+- Default Web UI login:
+  - `root` / `root`
 - Common build env overrides:
   - `BASE_SYSTEM`
   - `INCLUDE_DOCKER`
@@ -38,6 +61,7 @@ make ssh
   - `EFFECTIVE_CONFIG_PATH`
   - `APT_MIRROR`
   - `ALPINE_MIRROR`
+  - `COMPRESS_OUTPUT`
 
 ## Build and test contract
 
@@ -76,6 +100,16 @@ Supports:
 - Linux password
 - Web admin username / password
 
+Credential precedence:
+
+- `direct inputs > secrets > defaults`
+
+Secrets names:
+
+- `CUSTOM_ROOT_PASSWORD`
+- `CUSTOM_API_USERNAME`
+- `CUSTOM_API_PASSWORD`
+
 ### Retest
 
 `test.yml` retests existing CI artifacts by `run_id` or `artifact_id`.
@@ -83,3 +117,22 @@ Supports:
 ### Release
 
 `release.yml` does promotion, not rebuild.
+
+## Key files
+
+- `build.sh` — main build orchestrator
+- `build.env` — default build values
+- `lib/common.sh` / `lib/debian.sh` / `lib/alpine.sh` — build implementation
+- `configs/landscape_init.toml` — default topology config
+- `.github/scripts/render-effective-topology.sh` — renders effective topology config
+- `tests/test-readiness.sh` — shared readiness contract
+- `tests/test-dataplane.sh` — dataplane test
+- `README.md` — Chinese primary entry
+- `docs/en/README.md` — English primary entry
+- `CONTRIBUTING.md` — branch / PR / release process
+
+## Contribution expectations
+
+- Prefer branch + PR over direct push to `main`
+- If the change is user-visible, update `CHANGELOG.md` `Unreleased`
+- For CI / workflow / release changes, prefer PR flow
