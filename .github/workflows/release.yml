@@ -35,7 +35,7 @@ jobs:
     with:
       base_system: debian
       include_docker: 'false'
-      output_formats: img,pve-ova
+      output_formats: img,ova
       run_test: readiness,dataplane
       release_channel: public-release
       release_tag: ${{ needs.prepare.outputs.release_tag }}
@@ -50,7 +50,7 @@ jobs:
     with:
       base_system: debian
       include_docker: 'true'
-      output_formats: img,pve-ova
+      output_formats: img,ova
       run_test: readiness
       release_channel: public-release
       release_tag: ${{ needs.prepare.outputs.release_tag }}
@@ -137,8 +137,8 @@ jobs:
               echo "Artifact in $dir has include_docker=$include_docker, expected $expected_include_docker" >&2
               exit 1
             fi
-            if [ "$output_formats" != "img,pve-ova" ]; then
-              echo "Artifact in $dir has output_formats=$output_formats, expected img,pve-ova" >&2
+            if [ "$output_formats" != "img,ova" ]; then
+              echo "Artifact in $dir has output_formats=$output_formats, expected img,ova" >&2
               exit 1
             fi
             if [ "$release_channel" != "public-release" ]; then

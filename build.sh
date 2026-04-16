@@ -140,7 +140,7 @@ Usage:
 Options:
   --base-system debian|alpine
   --include-docker true|false
-  --output-format img|vmdk|pve-ova   (repeatable)
+  --output-format img|vmdk|ova   (repeatable)
   --version VERSION
   --skip-to PHASE
 
@@ -189,10 +189,10 @@ validate_include_docker() {
 
 validate_output_format() {
     case "$1" in
-        img|vmdk|pve-ova)
+        img|vmdk|ova)
             ;;
         *)
-            echo "ERROR: Unsupported output format '$1'. Use img, vmdk, or pve-ova." >&2
+            echo "ERROR: Unsupported output format '$1'. Use img, vmdk, or ova." >&2
             exit 1
             ;;
     esac
@@ -201,7 +201,7 @@ validate_output_format() {
 normalize_output_formats() {
     local -a raw_items=()
     local -a normalized=()
-    local raw_value trimmed value
+    local raw_value trimmed
     local seen=","
 
     if [[ ${#CLI_OUTPUT_FORMATS[@]} -gt 0 ]]; then
@@ -357,7 +357,7 @@ while [[ $# -gt 0 ]]; do
                 CLI_OUTPUT_FORMATS+=("$2")
                 shift 2
             else
-                echo "ERROR: --output-format requires img, vmdk, or pve-ova" >&2
+                echo "ERROR: --output-format requires img, vmdk, or ova" >&2
                 exit 1
             fi
             ;;
@@ -440,7 +440,7 @@ fi
 
 IMAGE_FILE="${OUTPUT_DIR}/${BUILD_NAME}.img"
 VMDK_FILE="${OUTPUT_DIR}/${BUILD_NAME}.vmdk"
-PVE_OVA_FILE="${OUTPUT_DIR}/${BUILD_NAME}.ova"
+OVA_FILE="${OUTPUT_DIR}/${BUILD_NAME}.ova"
 BUILD_METADATA_FILE="${OUTPUT_METADATA_DIR}/build-metadata.txt"
 RESOLVED_SOURCES_FILE="${OUTPUT_METADATA_DIR}/resolved-sources.env"
 
