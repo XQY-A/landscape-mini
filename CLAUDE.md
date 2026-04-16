@@ -36,7 +36,7 @@ make deps
 make deps-test
 make build
 make build BASE_SYSTEM=alpine
-make build INCLUDE_DOCKER=true OUTPUT_FORMATS=img,pve-ova
+make build INCLUDE_DOCKER=true OUTPUT_FORMATS=img,ova
 make test
 make test-dataplane
 make test-serial
@@ -116,7 +116,7 @@ Secrets names:
 ### Release
 
 `release.yml` rebuilds Debian release artifacts on tag pushes instead of promoting CI artifacts.
-It rebuilds both Debian tuples (`include_docker=true/false`) with `img,pve-ova`, validates metadata/config, then publishes `.img.gz` + `.ova`.
+It rebuilds both Debian tuples (`include_docker=true/false`) with `img,ova`, validates metadata/config, then publishes `.img.gz` + `.ova`.
 
 ## Key files
 

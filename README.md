@@ -30,7 +30,7 @@ Landscape Router 的最小化 x86 镜像构建器。支持 **Debian Trixie** 和
 
 - 同时支持 Debian 和 Alpine 两种基础系统
 - 镜像身份由显式组合定义：`base_system + include_docker + output_formats`
-- 输出格式支持 `img`、`vmdk`、`pve-ova`
+- 输出格式支持 `img`、`vmdk`、`ova`
 - 支持 BIOS + UEFI，常见虚拟化环境都比较友好
 - fork 用户也可以直接在 GitHub 上跑自定义构建
 - GitHub Actions 已经接好，支持自动构建、测试和发布
@@ -71,8 +71,8 @@ LANDSCAPE_ADMIN_USER=admin RUN_TEST=readiness make build
 # Alpine raw image
 make build BASE_SYSTEM=alpine
 
-# Debian + Docker + img,pve-ova
-make build INCLUDE_DOCKER=true OUTPUT_FORMATS=img,pve-ova
+# Debian + Docker + img,ova
+make build INCLUDE_DOCKER=true OUTPUT_FORMATS=img,ova
 ```
 
 本地支持的常用自定义项包括：
@@ -118,11 +118,13 @@ dd if=output/landscape-mini-x86-debian.img of=/dev/sdX bs=4M status=progress
 
 推荐两种方式：
 
-#### 方式 1：直接使用 `pve-ova`
+#### 方式 1：直接使用 `ova`
 
-- 构建时包含 `pve-ova` 输出格式
-- 上传生成的 `.ova`
+- 构建时在 `OUTPUT_FORMATS` 里加入 `ova`
+- 下载生成的 `.ova`
+- 当前 OVA 默认面向 PVE：2 vCPU、2G 内存、virtio 网卡
 - 在 PVE 中导入后检查启动模式、磁盘控制器和 bridge 绑定
+- 如果你希望 CPU type 使用 `host`，请在导入后手动设置；PVE 当前不会稳定从 OVF 元数据里继承这个值
 
 #### 方式 2：使用 raw `.img`
 
@@ -166,7 +168,7 @@ bash <(curl -sL https://raw.githubusercontent.com/bin456789/reinstall/main/reins
 |------|--------|------|
 | `BASE_SYSTEM` | `debian` | 基础系统：`debian` / `alpine` |
 | `INCLUDE_DOCKER` | `false` | 是否包含 Docker：`true` / `false` |
-| `OUTPUT_FORMATS` | `img` | 输出格式列表：`img`、`vmdk`、`pve-ova`，逗号分隔 |
+| `OUTPUT_FORMATS` | `img` | 输出格式列表：`img`、`vmdk`、`ova`，逗号分隔 |
 | `RUN_TEST` | _(empty)_ | 本地测试选择：空 / `none`、`readiness`、`readiness,dataplane` |
 | `LANDSCAPE_ADMIN_USER` | `root` | Web 管理用户名 |
 | `LANDSCAPE_ADMIN_PASS` | `root` | Web 管理密码 |
@@ -191,7 +193,7 @@ bash <(curl -sL https://raw.githubusercontent.com/bin456789/reinstall/main/reins
 
 - `base_system`：`debian` / `alpine`
 - `include_docker`：`true` / `false`
-- `output_formats`
+- `output_formats`（统一使用 `ova` 作为 OVA 输出格式名）
 - `landscape_version`
 - `lan_server_ip` / `lan_range_start` / `lan_range_end` / `lan_netmask`
 - `root_password`
@@ -199,6 +201,8 @@ bash <(curl -sL https://raw.githubusercontent.com/bin456789/reinstall/main/reins
 - `run_test`
 
 当前优先级：**direct inputs > secrets > defaults**。
+
+workflow 会在最开始先做入参校验，提前拦截非法 `output_formats` / `run_test` / 基本网络输入，减少跑到一半才失败的情况。
 
 测试契约统一为：
 
@@ -255,11 +259,12 @@ Router VM (eth0=WAN/SLIRP, eth1=LAN/mcast) ←→ Client VM (CirrOS, eth0=mcast)
 
 ## CI/CD
 
-- **CI**：手动触发始终可用；对 push 到 `main` / PR，仅在构建相关文件、`.github/` 下相关文件或 `CHANGELOG.md` 变更时自动运行
+- **CI**：手动触发始终可用；自动 `push main` / `PR -> main` 只在 shell / CI 执行逻辑变化时运行
+- **fork 保护**：fork 仓库里的自动事件默认只会 skip，不会真的执行自动 CI；需要时仍可手动触发
 - **自动 CI 验证面**：仅验证 `debian + include_docker=false`，并只请求 raw `img`
 - **Readiness / Dataplane 覆盖**：自动 CI 对 `include_docker=false` 跑 `readiness,dataplane`
 - **Artifact contract**：每个 image artifact 都包含 raw `.img`、`build-metadata.txt`、`effective-landscape_init.toml`；自动 CI 不再承担 `.vmdk` / `.ova` 导出
-- **Custom Build**：`custom-build.yml` 支持 fork 用户按显式组合构建，并支持 LAN/DHCP、Linux 密码、Web 管理账号密码和 `run_test` 输入
+- **Custom Build**：`custom-build.yml` 支持 fork 用户按显式组合构建，并在开头先做入参校验，再给出更明确的下载/导入引导
 - **Manual Retest**：`test.yml` 支持按 `run_id` 或 `artifact_id` 复测 Debian 默认公开组合，并重新传入 SSH / API 凭据
 - **Release**：推送 `v*` tag 时，`release.yml` 会在 tag 对应 commit 上重新构建 Debian 的 Docker / 非 Docker 产物，而不是 promote CI artifacts；发布公开默认面：`.img.gz` + `.ova`
 - **Alpine**：不再属于默认公开 release 面，按需通过 `Custom Build` 产出

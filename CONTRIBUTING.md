@@ -113,7 +113,7 @@ git push origin v0.2.3
 `release.yml` 现在会：
 - 在 tag 对应 commit 上重新构建 2 个 Debian tuple artifacts
 - tuple 覆盖为 `debian + include_docker=false` 与 `debian + include_docker=true`
-- 请求发布所需输出：`img,pve-ova`
+- 请求发布所需输出：`img,ova`
 - 校验 metadata / effective topology config / tuple 完整性
 - 压缩 raw `.img` 并创建 GitHub Release
 
