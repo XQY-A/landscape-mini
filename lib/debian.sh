@@ -194,9 +194,54 @@ EOF
     echo "  Setting timezone to ${TIMEZONE} ..."
     run_in_chroot "ln -sf /usr/share/zoneinfo/${TIMEZONE} /etc/localtime"
 
-    # ---- Locale (without locales package) ----
+    # ---- Locale ----
     echo "  Configuring locale (${LOCALE}) ..."
-    echo "LANG=${LOCALE}" > "${ROOTFS_DIR}/etc/default/locale"
+    if [[ "${LOCALE}" != "C.UTF-8" && "${LOCALE}" != *.UTF-8 ]]; then
+        echo "ERROR: Debian backend supports only C.UTF-8 or *.UTF-8 as LOCALE; got '${LOCALE}'." >&2
+        exit 1
+    fi
+
+    local locale_gen_entries=""
+    local locale_value
+    local extra_locale
+    local needs_locales_package=false
+
+    if [[ "${LOCALE}" != "C.UTF-8" ]]; then
+        locale_gen_entries+="${LOCALE} UTF-8\n"
+        needs_locales_package=true
+    fi
+
+    for extra_locale in ${EXTRA_LOCALES}; do
+        [[ -n "${extra_locale}" ]] || continue
+        if [[ "${extra_locale}" != *.UTF-8 ]]; then
+            echo "ERROR: Debian backend supports only *.UTF-8 in EXTRA_LOCALES; got '${extra_locale}'." >&2
+            exit 1
+        fi
+        if [[ "${extra_locale}" == "${LOCALE}" ]]; then
+            continue
+        fi
+        locale_gen_entries+="${extra_locale} UTF-8\n"
+        needs_locales_package=true
+    done
+
+    if [[ "${needs_locales_package}" == "true" ]]; then
+        echo "  Installing locale support ..."
+        run_in_chroot_retry 3 5 "
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get \
+                -o Acquire::Retries=3 \
+                -o Acquire::http::Timeout=60 \
+                -o Acquire::https::Timeout=60 \
+                install -y --no-install-recommends locales
+        "
+        printf '%b' "${locale_gen_entries}" > "${ROOTFS_DIR}/etc/locale.gen"
+        run_in_chroot "locale-gen"
+    fi
+
+    cat > "${ROOTFS_DIR}/etc/default/locale" <<EOF
+LANG=${LOCALE}
+LC_ALL=${LOCALE}
+EOF
 
     # ---- Root password ----
     echo "  Setting root password ..."
@@ -216,8 +261,10 @@ EOF
     # ---- Allow root password login via SSH ----
     echo "  Configuring SSH root login ..."
     mkdir -p "${ROOTFS_DIR}/etc/ssh/sshd_config.d"
-    cat > "${ROOTFS_DIR}/etc/ssh/sshd_config.d/root-login.conf" <<'EOF'
+    cat > "${ROOTFS_DIR}/etc/ssh/sshd_config.d/root-login.conf" <<EOF
 PermitRootLogin yes
+AcceptEnv LANG
+SetEnv LANG=${LOCALE} LC_ALL=${LOCALE}
 EOF
 
     # ---- Disable unnecessary network services ----
@@ -384,10 +431,12 @@ backend_cleanup() {
     echo "  Cleaning locale and i18n data ..."
     run_in_chroot "
         export DEBIAN_FRONTEND=noninteractive
-        # Remove libc-l10n translations (4.7M)
-        apt-get purge -y --auto-remove libc-l10n 2>/dev/null || true
+        if [ \"${LOCALE}\" = \"C.UTF-8\" ] && [ -z \"${EXTRA_LOCALES}\" ]; then
+            # Remove locale generation packages when the image stays on glibc's built-in C.UTF-8 only
+            apt-get purge -y --auto-remove libc-l10n locales 2>/dev/null || true
+        fi
 
-        # Remove all locales except en_US
+        # Remove translated message catalogs except English
         find /usr/share/locale -mindepth 1 -maxdepth 1 \
             ! -name 'en_US' ! -name 'en' ! -name 'locale-archive' \
             -exec rm -rf {} + 2>/dev/null || true
@@ -395,7 +444,7 @@ backend_cleanup() {
         # Keep only UTF-8 charmap, remove others (save ~3M)
         find /usr/share/i18n/charmaps -type f ! -name 'UTF-8.gz' -delete 2>/dev/null || true
 
-        # Keep only en_US and en_GB locale definitions
+        # Trim locale source definitions after generation
         find /usr/share/i18n/locales -type f \
             ! -name 'en_US' ! -name 'en_GB' ! -name 'i18n*' ! -name 'iso*' \
             ! -name 'translit_*' ! -name 'POSIX' \
@@ -412,6 +461,7 @@ backend_cleanup() {
             iconvconfig 2>/dev/null || true
         fi
     "
+
 
     # ---- Purge build-only packages ----
     # Note: do NOT purge initramfs-tools — it breaks linux-image dependency

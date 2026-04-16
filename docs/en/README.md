@@ -2,7 +2,7 @@
 
 [![Latest Release](https://img.shields.io/github/v/release/Cloud370/landscape-mini)](https://github.com/Cloud370/landscape-mini/releases/latest)
 
-English | [中文](../../README.md) | [Contributing](../../CONTRIBUTING.md) | [Download Latest Image](https://github.com/Cloud370/landscape-mini/releases/latest)
+English | [中文](../zh/README.md) | [Contributing](../../CONTRIBUTING.md) | [Download Latest Image](https://github.com/Cloud370/landscape-mini/releases/latest)
 
 A minimal x86 image builder for Landscape Router. It supports both **Debian Trixie** and **Alpine Linux** as base systems, produces compact disk images, and supports dual BIOS + UEFI boot.
 
@@ -23,6 +23,7 @@ If you want to **build a customized image**, for example to change:
 Start with:
 
 - [Custom Build Guide](./custom-build.md)
+- [PVE Installation Guide](./pve-install.md)
 
 If you are developing or debugging the build system itself, continue with the local build instructions below.
 
@@ -116,23 +117,9 @@ dd if=output/landscape-mini-x86-debian.img of=/dev/sdX bs=4M status=progress
 
 ### Proxmox VE (PVE)
 
-Two recommended paths:
+Start with:
 
-#### Option 1: Use `ova`
-
-- Include `ova` in `OUTPUT_FORMATS`
-- Download the generated `.ova`
-- The current OVA defaults are PVE-oriented: 2 vCPUs, 2G RAM, and a virtio NIC
-- Import it in PVE, then verify boot mode, disk controller, and bridge assignment
-- If you want CPU type `host`, set it manually after import; PVE does not reliably inherit that from OVF metadata today
-
-#### Option 2: Use the raw `.img`
-
-1. Upload the image to the PVE host.
-2. Create a VM without attaching a disk.
-3. Import the disk: `qm importdisk <vmid> landscape-mini-x86-debian.img local-lvm`
-4. Attach the imported disk in the VM hardware settings.
-5. Set the boot order and start the VM.
+- [PVE Installation Guide](./pve-install.md)
 
 ### Cloud Server (dd Script)
 
@@ -185,7 +172,8 @@ Avoid treating tracked `build.env` as the primary place for day-to-day customiza
 | `IMAGE_SIZE_MB` | `2048` | Initial image size (automatically shrunk later) |
 | `ROOT_PASSWORD` | `landscape` | Login password for `root` / `ld` |
 | `TIMEZONE` | `Asia/Shanghai` | Time zone |
-| `LOCALE` | `C.UTF-8` | System locale |
+| `LOCALE` | `C.UTF-8` | Default system locale |
+| `EXTRA_LOCALES` | `en_US.UTF-8` | Additional Debian UTF-8 locales to generate |
 
 ### Custom Builds (GitHub Actions)
 
@@ -222,15 +210,15 @@ The workflow writes the following build identity fields into `build-metadata.txt
 - `artifact_id`
 - `release_channel`
 
-The effective network topology is bundled as `effective-landscape_init.toml` so `test.yml`, fixed-release publishing, and tag release rebuild validation can use it.
+The effective network topology is carried inside the artifact as `effective-landscape_init.toml` and is consumed by `test.yml`, fixed-release publishing, and tag release rebuild validation.
 
 Successful Custom Build runs also publish to a fixed tag in the fork: `custom-build-latest`.
-It is a fixed entry point for the latest successful Custom Build, not a tuple-specific permanent download slot; any later successful Custom Build (for example Debian / Alpine, Docker / non-Docker) replaces its contents.
+It is a moving pointer to the latest successful Custom Build rather than a per-tuple permanent download slot; later successful runs overwrite it regardless of tuple (for example Debian / Alpine, Docker / non-Docker).
 
 - Release page: `https://github.com/<owner>/landscape-mini/releases/tag/custom-build-latest`
 - Direct download base: `https://github.com/<owner>/landscape-mini/releases/download/custom-build-latest/<asset>`
 
-If you need immutable build outputs, use the Artifacts from the corresponding workflow run or record the `run_id` / `artifact_id`.
+If you need immutable per-build outputs, use the Artifacts from that workflow run or record its `run_id` / `artifact_id`.
 
 ## Automated Testing
 
@@ -238,12 +226,12 @@ If you need immutable build outputs, use the Artifacts from the corresponding wo
 
 `make test` or `./tests/test-readiness.sh <image.img>` run the shared router readiness contract:
 
-1. Copy the image to a temporary file to protect build artifacts.
-2. Start QEMU in the background with automatic KVM detection.
-3. Wait for SSH, API listener, API login, and layout detection.
-4. Verify `eth0` / `eth1` and ensure core services reach the running state.
-5. When `include_docker=true`, additionally verify Docker is functional.
-6. Output readiness, service, and diagnostics snapshots, then clean up QEMU.
+1. Copy the image to a temporary file (protect the build artifact)
+2. Start QEMU in the background (auto-detect KVM)
+3. Wait for SSH, API listener, API login, and layout detection
+4. Verify `eth0` / `eth1` and core services reach running state
+5. When `include_docker=true`, additionally verify Docker is available
+6. Emit readiness / service / diagnostics snapshots and clean up QEMU
 
 ### Dataplane Tests
 
@@ -253,9 +241,9 @@ If you need immutable build outputs, use the Artifacts from the corresponding wo
 Router VM (eth0=WAN/SLIRP, eth1=LAN/mcast) ←→ Client VM (CirrOS, eth0=mcast)
 ```
 
-Coverage includes DHCP lease assignment, lease visibility in the Router API, and LAN connectivity between the router and client.
+Coverage includes DHCP lease assignment, lease visibility in the Router API, and LAN connectivity between Router and Client.
 
-> Dataplane scheduling is based on `include_docker=false`, not on legacy variant names.
+> Dataplane scheduling is based on `include_docker=false`, not legacy variant names.
 
 ## CI/CD
 
