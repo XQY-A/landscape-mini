@@ -28,7 +28,8 @@ backend_bootstrap() {
     echo "==== Phase 3: Bootstrapping Debian (${DEBIAN_RELEASE}) ===="
 
     echo "  Running debootstrap --variant=minbase ..."
-    debootstrap \
+    retry_command 3 5 \
+        debootstrap \
         --variant=minbase \
         --include=systemd,systemd-sysv,dbus \
         "${DEBIAN_RELEASE}" \
@@ -123,10 +124,18 @@ EOF
 
     # ---- Install packages ----
     echo "  Installing packages (this may take a while) ..."
-    run_in_chroot "
+    run_in_chroot_retry 3 5 "
         export DEBIAN_FRONTEND=noninteractive
-        apt-get update -y
-        apt-get install -y --no-install-recommends \
+        apt-get \
+            -o Acquire::Retries=3 \
+            -o Acquire::http::Timeout=60 \
+            -o Acquire::https::Timeout=60 \
+            update -y
+        apt-get \
+            -o Acquire::Retries=3 \
+            -o Acquire::http::Timeout=60 \
+            -o Acquire::https::Timeout=60 \
+            install -y --no-install-recommends \
             linux-image-amd64 \
             grub-efi-amd64 \
             grub-pc-bin \
@@ -161,10 +170,10 @@ EOF
 GRUB_DEFAULT=0
 GRUB_TIMEOUT=3
 GRUB_DISTRIBUTOR="Landscape"
-GRUB_CMDLINE_LINUX_DEFAULT="console=ttyS0,115200n8 console=tty0 systemd.log_level=debug systemd.log_target=console"
+GRUB_CMDLINE_LINUX_DEFAULT="console=ttyS0,115200n8"
 GRUB_CMDLINE_LINUX="net.ifnames=0 biosdevname=0 nomodeset"
 GRUB_TERMINAL_INPUT="console serial"
-GRUB_TERMINAL_OUTPUT="console serial"
+GRUB_TERMINAL_OUTPUT="serial"
 GRUB_SERIAL_COMMAND="serial --speed=115200 --unit=0 --word=8 --parity=no --stop=1"
 EOF
 
@@ -229,10 +238,11 @@ auto lo
 iface lo inet loopback
 EOF
 
-    # ---- DNS resolver ----
-    echo "  Writing /etc/resolv.conf ..."
-    rm -f "${ROOTFS_DIR}/etc/resolv.conf"
-    echo "nameserver 114.114.114.114" > "${ROOTFS_DIR}/etc/resolv.conf"
+    # ---- Build-time DNS resolver ----
+    configure_build_resolver
+
+    # ---- Image default DNS resolver ----
+    configure_image_resolver
 
     echo "  Phase 4 complete."
 }
@@ -279,7 +289,7 @@ EOF
 # Phase 6: Optional Docker Installation (Debian)
 # =============================================================================
 backend_install_docker() {
-    if [[ "${INCLUDE_DOCKER}" != "yes" ]]; then
+    if [[ "${INCLUDE_DOCKER}" != "true" ]]; then
         echo ""
         echo "==== Phase 6: Docker Installation (skipped) ===="
         return 0
@@ -288,35 +298,50 @@ backend_install_docker() {
     echo ""
     echo "==== Phase 6: Installing Docker (Debian) ===="
 
+    # ---- Build-time DNS resolver ----
+    configure_build_resolver
+
     # Install prerequisites
-    run_in_chroot "
+    run_in_chroot_retry 3 5 "
         export DEBIAN_FRONTEND=noninteractive
-        apt-get install -y --no-install-recommends ca-certificates curl
+        apt-get \
+            -o Acquire::Retries=3 \
+            -o Acquire::http::Timeout=60 \
+            -o Acquire::https::Timeout=60 \
+            install -y --no-install-recommends ca-certificates curl
         install -m 0755 -d /etc/apt/keyrings
     "
 
     # Add Docker GPG key
-    echo "  Adding Docker GPG key ..."
-    run_in_chroot "
-        curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc
+    echo "  Adding Docker GPG key from ${RESOLVED_DOCKER_APT_GPG_URL} ..."
+    run_in_chroot_retry 3 5 "
+        curl -fsSL --retry 3 --retry-delay 2 '${RESOLVED_DOCKER_APT_GPG_URL}' -o /etc/apt/keyrings/docker.asc
         chmod a+r /etc/apt/keyrings/docker.asc
     "
 
     # Add Docker repository
-    echo "  Adding Docker repository ..."
+    echo "  Adding Docker repository ${RESOLVED_DOCKER_APT_MIRROR} ..."
     local ARCH
     ARCH=$(run_in_chroot "dpkg --print-architecture")
-    run_in_chroot "
-        echo 'deb [arch=${ARCH} signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian ${DEBIAN_RELEASE} stable' \
+    run_in_chroot_retry 3 5 "
+        echo 'deb [arch=${ARCH} signed-by=/etc/apt/keyrings/docker.asc] ${RESOLVED_DOCKER_APT_MIRROR} ${DEBIAN_RELEASE} stable' \
             > /etc/apt/sources.list.d/docker.list
-        apt-get update -y
+        apt-get \
+            -o Acquire::Retries=3 \
+            -o Acquire::http::Timeout=60 \
+            -o Acquire::https::Timeout=60 \
+            update -y
     "
 
     # Install Docker packages
     echo "  Installing Docker packages ..."
-    run_in_chroot "
+    run_in_chroot_retry 3 5 "
         export DEBIAN_FRONTEND=noninteractive
-        apt-get install -y --no-install-recommends \
+        apt-get \
+            -o Acquire::Retries=3 \
+            -o Acquire::http::Timeout=60 \
+            -o Acquire::https::Timeout=60 \
+            install -y --no-install-recommends \
             docker-ce \
             docker-ce-cli \
             containerd.io \
@@ -337,6 +362,9 @@ EOF
     # Enable Docker service
     echo "  Enabling Docker service ..."
     run_in_chroot "systemctl enable docker.service"
+
+    # ---- Image default DNS resolver ----
+    configure_image_resolver
 
     echo "  Phase 6 complete."
 }

@@ -38,10 +38,326 @@ cleanup() {
 }
 
 # ---------------------------------------------------------------------------
+# Helper: prepare build-time DNS inside chroot
+# ---------------------------------------------------------------------------
+configure_build_resolver() {
+    echo "  Preparing build-time /etc/resolv.conf ..."
+    rm -f "${ROOTFS_DIR}/etc/resolv.conf"
+
+    if [[ -s /etc/resolv.conf ]]; then
+        cp /etc/resolv.conf "${ROOTFS_DIR}/etc/resolv.conf"
+    else
+        echo "nameserver 1.1.1.1" > "${ROOTFS_DIR}/etc/resolv.conf"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Helper: write image default DNS inside chroot
+# ---------------------------------------------------------------------------
+configure_image_resolver() {
+    echo "  Writing image /etc/resolv.conf ..."
+    rm -f "${ROOTFS_DIR}/etc/resolv.conf"
+    echo "nameserver 1.1.1.1" > "${ROOTFS_DIR}/etc/resolv.conf"
+}
+
+# ---------------------------------------------------------------------------
 # Helper: run a command inside the chroot
 # ---------------------------------------------------------------------------
 run_in_chroot() {
     LANG=C.UTF-8 LC_ALL=C.UTF-8 chroot "${ROOTFS_DIR}" ${CHROOT_SHELL} -c "$1"
+}
+
+# ---------------------------------------------------------------------------
+# Helper: retry transient network/package commands
+# ---------------------------------------------------------------------------
+retry_command() {
+    local attempt
+    local max_attempts="${1:-3}"
+    local delay_seconds="${2:-5}"
+
+    shift 2
+
+    for attempt in $(seq 1 "${max_attempts}"); do
+        if "$@"; then
+            return 0
+        fi
+        if [[ "${attempt}" -eq "${max_attempts}" ]]; then
+            echo "ERROR: Command failed after ${attempt} attempts: $*" >&2
+            return 1
+        fi
+        echo "WARN: Command failed on attempt ${attempt}, retrying: $*" >&2
+        sleep "${delay_seconds}"
+    done
+}
+
+# ---------------------------------------------------------------------------
+# Helper: run a command inside chroot with retries
+# ---------------------------------------------------------------------------
+run_in_chroot_retry() {
+    local max_attempts="${1:-3}"
+    local delay_seconds="${2:-5}"
+    local script="$3"
+
+    retry_command "${max_attempts}" "${delay_seconds}" \
+        env LANG=C.UTF-8 LC_ALL=C.UTF-8 chroot "${ROOTFS_DIR}" ${CHROOT_SHELL} -c "set -e
+${script}"
+}
+
+# ---------------------------------------------------------------------------
+# Helper: measure URL download health and speed
+# ---------------------------------------------------------------------------
+probe_url() {
+    local url="$1"
+    local timeout_seconds="${2:-5}"
+    local sample_bytes="${3:-5242880}"
+    local output
+    local curl_exit=0
+    local http_code size_download speed_download
+
+    output=$(curl -fsSLo /dev/null \
+        --connect-timeout "${timeout_seconds}" \
+        --max-time "${timeout_seconds}" \
+        --range "0-$((sample_bytes - 1))" \
+        --write-out '%{http_code} %{size_download} %{speed_download}' \
+        "$url" 2>/dev/null) || curl_exit=$?
+
+    if [[ "${curl_exit}" -ne 0 || -z "${output}" ]]; then
+        return 1
+    fi
+
+    read -r http_code size_download speed_download <<< "${output}"
+    if [[ "${http_code}" != "200" && "${http_code}" != "206" ]]; then
+        return 1
+    fi
+
+    if ! awk "BEGIN {exit !(${size_download} > 0 && ${speed_download} > 0)}"; then
+        return 1
+    fi
+
+    printf '%s\n' "${speed_download}"
+}
+
+# ---------------------------------------------------------------------------
+# Helper: extract first package path from Debian-style Packages content
+# ---------------------------------------------------------------------------
+extract_debian_package_path() {
+    awk '
+        /^Filename: / && first == "" { first = $2 }
+        END {
+            if (first != "") {
+                print first
+            } else {
+                exit 1
+            }
+        }
+    '
+}
+
+# ---------------------------------------------------------------------------
+# Helper: derive a representative Debian package URL from Packages index
+# ---------------------------------------------------------------------------
+derive_debian_package_url() {
+    local candidate="$1"
+    local packages_suffix="$2"
+    local timeout_seconds="${3:-5}"
+    local packages_url="${candidate%/}${packages_suffix}"
+    local index_file
+    local package_path
+
+    index_file=$(mktemp)
+    if ! curl -fsSL \
+        --connect-timeout "${timeout_seconds}" \
+        --max-time "$((timeout_seconds * 4))" \
+        -o "${index_file}" \
+        "$packages_url" 2>/dev/null; then
+        rm -f "${index_file}"
+        return 1
+    fi
+
+    package_path=$(xz -dc "${index_file}" 2>/dev/null | extract_debian_package_path)
+    rm -f "${index_file}"
+
+    if [[ -z "${package_path}" ]]; then
+        return 1
+    fi
+
+    printf '%s/%s\n' "${candidate%/}" "${package_path#/}"
+}
+
+# ---------------------------------------------------------------------------
+# Helper: derive a representative Alpine package URL from APKINDEX
+# ---------------------------------------------------------------------------
+derive_alpine_package_url() {
+    local candidate="$1"
+    local repo_prefix="$2"
+    local timeout_seconds="${3:-5}"
+    local index_url="${candidate%/}${repo_prefix}/APKINDEX.tar.gz"
+    local index_file
+    local package_file
+
+    index_file=$(mktemp)
+    if ! curl -fsSL \
+        --connect-timeout "${timeout_seconds}" \
+        --max-time "${timeout_seconds}" \
+        -o "${index_file}" \
+        "$index_url" 2>/dev/null; then
+        rm -f "${index_file}"
+        return 1
+    fi
+
+    package_file=$(tar -xOzf "${index_file}" 2>/dev/null | awk -F: '
+        /^P:/ && pkg == "" { pkg=$2 }
+        /^V:/ && ver == "" && pkg != "" { ver=$2 }
+        END {
+            if (pkg != "" && ver != "") {
+                print pkg "-" ver ".apk"
+            } else {
+                exit 1
+            }
+        }
+    ')
+    rm -f "${index_file}"
+
+    if [[ -z "${package_file}" ]]; then
+        return 1
+    fi
+
+    printf '%s%s/%s\n' "${candidate%/}" "${repo_prefix}" "${package_file}"
+}
+
+# ---------------------------------------------------------------------------
+# Helper: derive a representative Debian package URL from plain-text Packages index
+# ---------------------------------------------------------------------------
+derive_plain_debian_package_url() {
+    local candidate="$1"
+    local packages_suffix="$2"
+    local timeout_seconds="${3:-5}"
+    local packages_url="${candidate%/}${packages_suffix}"
+    local index_file
+    local package_path
+
+    index_file=$(mktemp)
+    if ! curl -fsSL \
+        --connect-timeout "${timeout_seconds}" \
+        --max-time "$((timeout_seconds * 4))" \
+        -o "${index_file}" \
+        "$packages_url" 2>/dev/null; then
+        rm -f "${index_file}"
+        return 1
+    fi
+
+    package_path=$(extract_debian_package_path < "${index_file}")
+    rm -f "${index_file}"
+
+    if [[ -z "${package_path}" ]]; then
+        return 1
+    fi
+
+    printf '%s/%s\n' "${candidate%/}" "${package_path#/}"
+}
+
+# ---------------------------------------------------------------------------
+# Helper: derive a representative direct URL
+# ---------------------------------------------------------------------------
+derive_direct_probe_url() {
+    local candidate="$1"
+    local probe_target="$2"
+
+    printf '%s%s\n' "${candidate%/}" "${probe_target}"
+}
+
+# ---------------------------------------------------------------------------
+# Helper: select fastest healthy source from candidates
+# ---------------------------------------------------------------------------
+select_best_source() {
+    local source_name="$1"
+    local candidates="$2"
+    local probe_mode="$3"
+    local probe_target="$4"
+    local timeout_seconds="${5:-5}"
+    local sample_bytes="${6:-5242880}"
+    local best_candidate=""
+    local best_speed=""
+    local candidate representative_url measured_speed
+
+    for candidate in ${candidates}; do
+        case "${probe_mode}" in
+            direct)
+                representative_url=$(derive_direct_probe_url "${candidate}" "${probe_target}")
+                ;;
+            debian-package)
+                representative_url=$(derive_debian_package_url "${candidate}" "${probe_target}" "${timeout_seconds}") || {
+                    echo "  [SKIP] ${source_name}: ${candidate}" >&2
+                    continue
+                }
+                ;;
+            plain-debian-package)
+                representative_url=$(derive_plain_debian_package_url "${candidate}" "${probe_target}" "${timeout_seconds}") || {
+                    echo "  [SKIP] ${source_name}: ${candidate}" >&2
+                    continue
+                }
+                ;;
+            alpine-package)
+                representative_url=$(derive_alpine_package_url "${candidate}" "${probe_target}" "${timeout_seconds}") || {
+                    echo "  [SKIP] ${source_name}: ${candidate}" >&2
+                    continue
+                }
+                ;;
+            *)
+                echo "ERROR: Unknown probe mode '${probe_mode}' for ${source_name}." >&2
+                return 1
+                ;;
+        esac
+
+        echo "  Probing ${source_name}: ${representative_url}" >&2
+        if measured_speed=$(probe_url "${representative_url}" "${timeout_seconds}" "${sample_bytes}"); then
+            echo "  [OK] ${source_name}: ${candidate} (${measured_speed} B/s)" >&2
+            if [[ -z "${best_candidate}" ]] || awk "BEGIN {exit !(${measured_speed} > ${best_speed})}"; then
+                best_candidate="${candidate}"
+                best_speed="${measured_speed}"
+            fi
+        else
+            echo "  [SKIP] ${source_name}: ${candidate}" >&2
+        fi
+    done
+
+    if [[ -z "${best_candidate}" ]]; then
+        return 1
+    fi
+
+    printf '%s\n' "${best_candidate}"
+}
+
+# ---------------------------------------------------------------------------
+# Helper: resolve explicit or probed source
+# ---------------------------------------------------------------------------
+resolve_source() {
+    local source_name="$1"
+    local explicit_value="$2"
+    local candidates="$3"
+    local probe_mode="$4"
+    local probe_target="$5"
+    local resolved_var_name="$6"
+    local source_origin_var_name="$7"
+    local timeout_seconds="${8:-5}"
+    local sample_bytes="${9:-5242880}"
+    local resolved_value
+
+    if [[ -n "${explicit_value}" ]]; then
+        printf -v "${resolved_var_name}" '%s' "${explicit_value}"
+        printf -v "${source_origin_var_name}" '%s' "explicit"
+        echo "  Using explicit ${source_name}: ${explicit_value}"
+        return 0
+    fi
+
+    if ! resolved_value=$(select_best_source "${source_name}" "${candidates}" "${probe_mode}" "${probe_target}" "${timeout_seconds}" "${sample_bytes}"); then
+        echo "ERROR: No healthy ${source_name} candidates found." >&2
+        return 1
+    fi
+
+    printf -v "${resolved_var_name}" '%s' "${resolved_value}"
+    printf -v "${source_origin_var_name}" '%s' "probed"
+    echo "  Selected ${source_name}: ${resolved_value}"
 }
 
 # ---------------------------------------------------------------------------
@@ -64,6 +380,233 @@ umount_chroot_fs() {
     umount "${ROOTFS_DIR}/sys" 2>/dev/null || true
     umount "${ROOTFS_DIR}/dev/pts" 2>/dev/null || true
     umount "${ROOTFS_DIR}/dev" 2>/dev/null || true
+}
+
+output_format_requested() {
+    local requested="$1"
+    local format
+    for format in "${OUTPUT_FORMAT_LIST[@]}"; do
+        if [[ "${format}" == "${requested}" ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+build_produced_files_manifest() {
+    local artifact
+    local manifest=()
+
+    for artifact in "${IMAGE_FILE}" "${VMDK_FILE}" "${PVE_OVA_FILE}"; do
+        if [[ -f "${artifact}" ]]; then
+            manifest+=("$(basename "${artifact}")")
+        fi
+    done
+
+    printf '%s\n' "$(IFS=,; echo "${manifest[*]}")"
+}
+
+write_local_build_metadata() {
+    mkdir -p "${OUTPUT_METADATA_DIR}"
+
+    local produced_files
+    produced_files="$(build_produced_files_manifest)"
+
+    if [[ -f "${RESOLVED_SOURCES_FILE}" ]]; then
+        # shellcheck disable=SC1090
+        source "${RESOLVED_SOURCES_FILE}"
+    fi
+
+    cat > "${BUILD_METADATA_FILE}" <<EOF
+base_system=${BASE_SYSTEM}
+include_docker=${INCLUDE_DOCKER}
+output_formats=${OUTPUT_FORMATS}
+run_test=${RUN_TEST:-none}
+produced_files=${produced_files}
+landscape_version=${LANDSCAPE_VERSION}
+build_name=${BUILD_NAME}
+image_file=$(basename "${IMAGE_FILE}")
+config_profile=${EFFECTIVE_CONFIG_PROFILE}
+topology_source=${EFFECTIVE_TOPOLOGY_SOURCE}
+release_channel=${RELEASE_CHANNEL:-local}
+release_tag=${RELEASE_TAG:-}
+repository_owner=${REPOSITORY_OWNER:-}
+root_password_source=${ROOT_PASSWORD_SOURCE}
+api_username_source=${LANDSCAPE_ADMIN_USER_SOURCE}
+api_password_source=${LANDSCAPE_ADMIN_PASS_SOURCE}
+api_username=${LANDSCAPE_ADMIN_USER}
+resolved_apt_mirror=${resolved_apt_mirror:-${RESOLVED_APT_MIRROR:-unused}}
+resolved_apt_mirror_source=${resolved_apt_mirror_source:-${RESOLVED_APT_MIRROR_SOURCE:-unused}}
+resolved_alpine_mirror=${resolved_alpine_mirror:-${RESOLVED_ALPINE_MIRROR:-unused}}
+resolved_alpine_mirror_source=${resolved_alpine_mirror_source:-${RESOLVED_ALPINE_MIRROR_SOURCE:-unused}}
+resolved_docker_apt_mirror=${resolved_docker_apt_mirror:-${RESOLVED_DOCKER_APT_MIRROR:-unused}}
+resolved_docker_apt_mirror_source=${resolved_docker_apt_mirror_source:-${RESOLVED_DOCKER_APT_MIRROR_SOURCE:-unused}}
+resolved_docker_apt_gpg_url=${resolved_docker_apt_gpg_url:-${RESOLVED_DOCKER_APT_GPG_URL:-unused}}
+resolved_docker_apt_gpg_url_source=${resolved_docker_apt_gpg_url_source:-${RESOLVED_DOCKER_APT_GPG_URL_SOURCE:-unused}}
+timestamp_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+EOF
+}
+
+xml_escape() {
+    local value="$1"
+    value="${value//&/&amp;}"
+    value="${value//</&lt;}"
+    value="${value//>/&gt;}"
+    value="${value//\"/&quot;}"
+    value="${value//\'/&apos;}"
+    printf '%s' "${value}"
+}
+
+export_vmdk() {
+    if [[ -f "${VMDK_FILE}" ]]; then
+        echo "  [OK] VMDK already present: ${VMDK_FILE}"
+        return 0
+    fi
+
+    echo "  Exporting VMDK ..."
+    qemu-img convert -f raw -O vmdk "${IMAGE_FILE}" "${VMDK_FILE}"
+    echo "  VMDK created: ${VMDK_FILE}"
+}
+
+export_pve_ova() {
+    local work_dir ovf_path mf_path stream_vmdk_path stream_vmdk_name
+    local ovf_name mf_name
+    local raw_size_bytes sectors_512 stream_vmdk_size_bytes
+    local vm_name escaped_vm_name os_desc escaped_os_desc os_id cpu_cores memory_mb
+
+    if [[ -f "${PVE_OVA_FILE}" ]]; then
+        echo "  [OK] PVE OVA already present: ${PVE_OVA_FILE}"
+        return 0
+    fi
+
+    echo "  Exporting PVE OVA ..."
+
+    work_dir=$(mktemp -d "${OUTPUT_DIR}/.pve-ova-XXXXXX")
+    ovf_name="${BUILD_NAME}.ovf"
+    mf_name="${BUILD_NAME}.mf"
+    stream_vmdk_name="${BUILD_NAME}.vmdk"
+    ovf_path="${work_dir}/${ovf_name}"
+    mf_path="${work_dir}/${mf_name}"
+    stream_vmdk_path="${work_dir}/${stream_vmdk_name}"
+
+    raw_size_bytes=$(stat -c '%s' "${IMAGE_FILE}")
+    sectors_512=$(( raw_size_bytes / 512 ))
+    cpu_cores="${OVA_CPU_CORES:-2}"
+    memory_mb="${OVA_MEMORY_MB:-1024}"
+
+    if [[ "${BASE_SYSTEM}" == "alpine" ]]; then
+        os_id="93"
+        os_desc="Alpine Linux 64-bit"
+    else
+        os_id="94"
+        os_desc="Debian GNU/Linux 64-bit"
+    fi
+
+    if [[ "${INCLUDE_DOCKER}" == "true" ]]; then
+        vm_name="${BUILD_NAME} (docker)"
+    else
+        vm_name="${BUILD_NAME}"
+    fi
+
+    escaped_vm_name=$(xml_escape "${vm_name}")
+    escaped_os_desc=$(xml_escape "${os_desc}")
+
+    qemu-img convert -f raw -O vmdk -o subformat=streamOptimized "${IMAGE_FILE}" "${stream_vmdk_path}"
+    stream_vmdk_size_bytes=$(stat -c '%s' "${stream_vmdk_path}")
+
+    cat > "${ovf_path}" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<Envelope xmlns="http://schemas.dmtf.org/ovf/envelope/1"
+          xmlns:cim="http://schemas.dmtf.org/wbem/wscim/1/common"
+          xmlns:ovf="http://schemas.dmtf.org/ovf/envelope/1"
+          xmlns:rasd="http://schemas.dmtf.org/wbem/wscim/1/cim-schema/2/CIM_ResourceAllocationSettingData"
+          xmlns:vssd="http://schemas.dmtf.org/wbem/wscim/1/cim-schema/2/CIM_VirtualSystemSettingData">
+  <References>
+    <File ovf:id="file1" ovf:href="${stream_vmdk_name}" ovf:size="${stream_vmdk_size_bytes}"/>
+  </References>
+  <DiskSection>
+    <Info>Virtual disk information</Info>
+    <Disk ovf:diskId="disk1"
+          ovf:fileRef="file1"
+          ovf:capacity="${sectors_512}"
+          ovf:capacityAllocationUnits="byte * 512"/>
+  </DiskSection>
+  <NetworkSection>
+    <Info>Logical networks</Info>
+    <Network ovf:name="bridged">
+      <Description>Default bridged network</Description>
+    </Network>
+  </NetworkSection>
+  <VirtualSystem ovf:id="${escaped_vm_name}">
+    <Info>A virtual machine</Info>
+    <Name>${escaped_vm_name}</Name>
+    <OperatingSystemSection ovf:id="${os_id}">
+      <Info>Guest operating system</Info>
+      <Description>${escaped_os_desc}</Description>
+    </OperatingSystemSection>
+    <VirtualHardwareSection>
+      <Info>Virtual hardware requirements</Info>
+      <System>
+        <vssd:ElementName>Virtual Hardware Family</vssd:ElementName>
+        <vssd:InstanceID>0</vssd:InstanceID>
+        <vssd:VirtualSystemIdentifier>${escaped_vm_name}</vssd:VirtualSystemIdentifier>
+        <vssd:VirtualSystemType>vmx-14</vssd:VirtualSystemType>
+      </System>
+      <Item>
+        <rasd:AllocationUnits>hertz * 10^6</rasd:AllocationUnits>
+        <rasd:Description>Number of Virtual CPUs</rasd:Description>
+        <rasd:ElementName>${cpu_cores} virtual CPU(s)</rasd:ElementName>
+        <rasd:InstanceID>1</rasd:InstanceID>
+        <rasd:ResourceType>3</rasd:ResourceType>
+        <rasd:VirtualQuantity>${cpu_cores}</rasd:VirtualQuantity>
+      </Item>
+      <Item>
+        <rasd:AllocationUnits>byte * 2^20</rasd:AllocationUnits>
+        <rasd:Description>Memory Size</rasd:Description>
+        <rasd:ElementName>${memory_mb}MB of memory</rasd:ElementName>
+        <rasd:InstanceID>2</rasd:InstanceID>
+        <rasd:ResourceType>4</rasd:ResourceType>
+        <rasd:VirtualQuantity>${memory_mb}</rasd:VirtualQuantity>
+      </Item>
+      <Item>
+        <rasd:Address>0</rasd:Address>
+        <rasd:Description>SATA Controller</rasd:Description>
+        <rasd:ElementName>sataController0</rasd:ElementName>
+        <rasd:InstanceID>3</rasd:InstanceID>
+        <rasd:ResourceSubType>AHCI</rasd:ResourceSubType>
+        <rasd:ResourceType>20</rasd:ResourceType>
+      </Item>
+      <Item>
+        <rasd:AddressOnParent>0</rasd:AddressOnParent>
+        <rasd:Description>Disk Drive</rasd:Description>
+        <rasd:ElementName>disk1</rasd:ElementName>
+        <rasd:HostResource>ovf:/disk/disk1</rasd:HostResource>
+        <rasd:InstanceID>4</rasd:InstanceID>
+        <rasd:Parent>3</rasd:Parent>
+        <rasd:ResourceType>17</rasd:ResourceType>
+      </Item>
+      <Item>
+        <rasd:AutomaticAllocation>true</rasd:AutomaticAllocation>
+        <rasd:Connection>bridged</rasd:Connection>
+        <rasd:Description>E1000 ethernet adapter</rasd:Description>
+        <rasd:ElementName>ethernet0</rasd:ElementName>
+        <rasd:InstanceID>5</rasd:InstanceID>
+        <rasd:ResourceSubType>E1000</rasd:ResourceSubType>
+        <rasd:ResourceType>10</rasd:ResourceType>
+      </Item>
+    </VirtualHardwareSection>
+  </VirtualSystem>
+</Envelope>
+EOF
+
+    (
+        cd "${work_dir}"
+        sha256sum "${ovf_name}" "${stream_vmdk_name}" | awk '{print "SHA256(" $2 ")= " $1}' > "${mf_name}"
+        tar --format=ustar -cf "${PVE_OVA_FILE}" "${ovf_name}" "${stream_vmdk_name}" "${mf_name}"
+    )
+
+    rm -rf "${work_dir}"
+    echo "  PVE OVA created: ${PVE_OVA_FILE}"
 }
 
 # =============================================================================
@@ -130,7 +673,7 @@ phase_create_image() {
     echo ""
     echo "==== Phase 2: Creating Disk Image ===="
 
-    mkdir -p "${OUTPUT_DIR}" "${ROOTFS_DIR}"
+    mkdir -p "${OUTPUT_DIR}" "${OUTPUT_METADATA_DIR}" "${ROOTFS_DIR}"
 
     # Create raw image
     echo "  Creating ${IMAGE_SIZE_MB}MB raw image ..."
@@ -250,11 +793,11 @@ EOF
 }
 
 # =============================================================================
-# Phase 7: Cleanup & Shrink Image (shared parts)
+# Phase 7: Cleanup, Shrink, and Export
 # =============================================================================
 phase_cleanup_and_shrink() {
     echo ""
-    echo "==== Phase 7: Cleanup & Shrink ===="
+    echo "==== Phase 7: Cleanup, Shrink, and Export ===="
 
     # ---- Strip landscape binary ----
     echo "  Stripping landscape-webserver binary ..."
@@ -274,11 +817,8 @@ phase_cleanup_and_shrink() {
             KDIR=\$(ls -d /lib/modules/*/kernel 2>/dev/null | head -1)
         fi
         if [ -n \"\$KDIR\" ]; then
-            # === Top-level subsystems ===
             rm -rf \"\$KDIR/sound\"
 
-            # === drivers/ — bulk removal (keep: net, virtio, block, tty, pci, hv, char) ===
-            # NOTE: char = hw_random/virtio-rng/TPM (~2-3MB, critical VM entropy source)
             for d in media gpu infiniband iio comedi staging hid input video \
                      bluetooth usb platform md mtd misc target \
                      accel mmc isdn edac crypto \
@@ -290,32 +830,27 @@ phase_cleanup_and_shrink() {
                 rm -rf \"\$KDIR/drivers/\$d\"
             done
 
-            # === drivers/net/ — keep virtio, phy, bonding, ppp, vxlan, wireguard, hyperv, ethernet ===
             for d in can wwan arcnet fddi hamradio ieee802154 wan wireless \
                      dsa fjes hippi plip slip thunderbolt xen-netback \
                      mdio pcs ipvlan; do
                 rm -rf \"\$KDIR/drivers/net/\$d\"
             done
 
-            # === drivers/net/ethernet/ — keep intel, realtek, virtio (broadcom optional) ===
             if [ -d \"\$KDIR/drivers/net/ethernet\" ]; then
                 for d in \"\$KDIR/drivers/net/ethernet\"/*/; do
                     case \"\$(basename \"\$d\")\" in
-                        intel|realtek|broadcom|amazon|google|mellanox|microsoft|aquantia|amd|huawei|marvell|atheros|cavium|chelsio) ;;  # keep common physical/cloud NIC drivers
+                        intel|realtek|broadcom|amazon|google|mellanox|microsoft|aquantia|amd|huawei|marvell|atheros|cavium|chelsio) ;;
                         *) rm -rf \"\$d\" ;;
                     esac
                 done
             fi
 
-            # === net/ — keep core, ipv4, ipv6, netfilter, bridge, sched, 8021q, tls, xfrm, vmw_vsock ===
-            # NOTE: vmw_vsock kept for VMware/ESXi VM-host communication (~50KB)
             for d in bluetooth mac80211 wireless sunrpc ceph tipc nfc rxrpc smc sctp \
                      atm dccp ieee802154 mac802154 6lowpan 9p openvswitch \
                      rds l2tp phonet can x25 appletalk rfkill lapb nsh; do
                 rm -rf \"\$KDIR/net/\$d\"
             done
 
-            # === fs/ — keep ext4, jbd2, fat, nls (needed by vfat), fuse, overlay ===
             for d in bcachefs btrfs xfs ocfs2 f2fs jfs reiserfs gfs2 nilfs2 orangefs coda \
                      smb nfs nfsd ceph ubifs afs ntfs3 dlm jffs2 udf netfs \
                      hfsplus hfs hpfs exfat ufs ext2 ecryptfs squashfs sysv minix \
@@ -323,7 +858,6 @@ phase_cleanup_and_shrink() {
                 rm -rf \"\$KDIR/fs/\$d\"
             done
 
-            # Rebuild module dependencies
             MODDIR=\$(ls -d /usr/lib/modules/*/ 2>/dev/null | head -1)
             if [ -z \"\$MODDIR\" ]; then
                 MODDIR=\$(ls -d /lib/modules/*/ 2>/dev/null | head -1)
@@ -358,7 +892,7 @@ phase_cleanup_and_shrink() {
     # ---- Truncate udev hwdb ----
     echo "  Truncating udev hardware database ..."
     rm -rf "${ROOTFS_DIR}/usr/lib/udev/hwdb.d" 2>/dev/null || true
-    if [ -f "${ROOTFS_DIR}/usr/lib/udev/hwdb.bin" ]; then
+    if [[ -f "${ROOTFS_DIR}/usr/lib/udev/hwdb.bin" ]]; then
         : > "${ROOTFS_DIR}/usr/lib/udev/hwdb.bin"
     fi
 
@@ -440,34 +974,22 @@ phase_cleanup_and_shrink() {
     dd if="${IMAGE_FILE}.mbr" of="${IMAGE_FILE}" bs=440 count=1 conv=notrunc 2>/dev/null
     rm -f "${IMAGE_FILE}.mbr"
 
-    # Optional: convert to VMDK
-    if [[ "${OUTPUT_FORMAT}" == "vmdk" || "${OUTPUT_FORMAT}" == "both" ]]; then
-        echo "  Converting to VMDK ..."
-        local VMDK_FILE="${OUTPUT_DIR}/landscape-mini-x86${IMAGE_SUFFIX}.vmdk"
-        qemu-img convert -f raw -O vmdk "${IMAGE_FILE}" "${VMDK_FILE}"
-        echo "  VMDK created: ${VMDK_FILE}"
-    fi
+    output_format_requested vmdk && export_vmdk
+    output_format_requested pve-ova && export_pve_ova
 
-    # Optional: compress with gzip
     if [[ "${COMPRESS_OUTPUT}" == "yes" ]]; then
-        echo "  Compressing image with gzip ..."
+        echo "  Compressing raw image with gzip ..."
         gzip -k -f "${IMAGE_FILE}"
         echo "  Compressed: ${IMAGE_FILE}.gz"
 
-        if [[ "${OUTPUT_FORMAT}" == "vmdk" || "${OUTPUT_FORMAT}" == "both" ]]; then
-            local VMDK_FILE="${OUTPUT_DIR}/landscape-mini-x86${IMAGE_SUFFIX}.vmdk"
-            if [[ -f "${VMDK_FILE}" ]]; then
-                gzip -k -f "${VMDK_FILE}"
-                echo "  Compressed: ${VMDK_FILE}.gz"
-            fi
+        if [[ -f "${VMDK_FILE}" ]]; then
+            echo "  Compressing VMDK image with gzip ..."
+            gzip -k -f "${VMDK_FILE}"
+            echo "  Compressed: ${VMDK_FILE}.gz"
         fi
     fi
 
-    # If format is vmdk only, remove the raw image
-    if [[ "${OUTPUT_FORMAT}" == "vmdk" ]]; then
-        echo "  Removing raw image (vmdk-only output) ..."
-        rm -f "${IMAGE_FILE}"
-    fi
+    write_local_build_metadata
 
     echo "  Phase 7 complete."
 }
@@ -489,12 +1011,11 @@ phase_report() {
     fi
 
     if [[ -f "${IMAGE_FILE}.gz" ]]; then
-        local GZ_SIZE
-        GZ_SIZE=$(du -h "${IMAGE_FILE}.gz" | awk '{print $1}')
-        echo "  Compressed: ${IMAGE_FILE}.gz (${GZ_SIZE})"
+        local IMG_GZ_SIZE
+        IMG_GZ_SIZE=$(du -h "${IMAGE_FILE}.gz" | awk '{print $1}')
+        echo "  Compressed: ${IMAGE_FILE}.gz (${IMG_GZ_SIZE})"
     fi
 
-    local VMDK_FILE="${OUTPUT_DIR}/landscape-mini-x86${IMAGE_SUFFIX}.vmdk"
     if [[ -f "${VMDK_FILE}" ]]; then
         local VMDK_SIZE
         VMDK_SIZE=$(du -h "${VMDK_FILE}" | awk '{print $1}')
@@ -507,12 +1028,22 @@ phase_report() {
         echo "  Compressed: ${VMDK_FILE}.gz (${VMDK_GZ_SIZE})"
     fi
 
+    if [[ -f "${PVE_OVA_FILE}" ]]; then
+        local OVA_SIZE
+        OVA_SIZE=$(du -h "${PVE_OVA_FILE}" | awk '{print $1}')
+        echo "  PVE OVA   : ${PVE_OVA_FILE} (${OVA_SIZE})"
+    fi
+
+    if [[ -f "${BUILD_METADATA_FILE}" ]]; then
+        echo "  Metadata  : ${BUILD_METADATA_FILE}"
+    fi
+
     echo ""
     echo "To write the raw image to a disk:"
     echo "  dd if=${IMAGE_FILE} of=/dev/sdX bs=4M status=progress"
     echo ""
     echo "To boot in QEMU:"
-    echo "  qemu-system-x86_64 -enable-kvm -m 512 -bios /usr/share/ovmf/OVMF.fd \\"
+    echo "  qemu-system-x86_64 -enable-kvm -m 512 -bios /usr/share/ovmf/OVMF.fd ..."
     echo "    -drive file=${IMAGE_FILE},format=raw -nic user,hostfwd=tcp::2222-:22"
     echo ""
     echo "Default credentials:  root / ${ROOT_PASSWORD}  |  ld / ${ROOT_PASSWORD}"

@@ -1,19 +1,22 @@
-name: Build and Validate Variant
+name: Build and Validate Image
 
 on:
   workflow_call:
     inputs:
-      variant:
+      base_system:
         required: true
         type: string
-      build_flags:
+      include_docker:
+        required: true
+        type: string
+      output_formats:
+        required: false
+        type: string
+        default: "img"
+      run_test:
         required: false
         type: string
         default: ""
-      run_e2e:
-        required: false
-        type: boolean
-        default: true
       landscape_version:
         required: false
         type: string
@@ -66,6 +69,18 @@ on:
         required: false
         type: string
         default: "default"
+      release_channel:
+        required: false
+        type: string
+        default: "workflow"
+      release_tag:
+        required: false
+        type: string
+        default: ""
+      repository_owner:
+        required: false
+        type: string
+        default: ""
       image_retention_days:
         required: false
         type: number
@@ -74,14 +89,39 @@ on:
         required: false
         type: number
         default: 7
+    outputs:
+      resolved_version:
+        value: ${{ jobs.build_image.outputs.resolved_version }}
+      build_name:
+        value: ${{ jobs.build_image.outputs.build_name }}
+      artifact_tuple:
+        value: ${{ jobs.build_image.outputs.artifact_tuple }}
+      artifact_id:
+        value: ${{ jobs.build_image.outputs.artifact_id }}
+      image_artifact:
+        value: ${{ jobs.build_image.outputs.image_artifact }}
+      log_artifact:
+        value: ${{ jobs.build_image.outputs.log_artifact }}
 
 env:
   TEST_LOG_DIR: output/test-logs
 
 jobs:
-  build-and-validate:
+  build_image:
     runs-on: ubuntu-24.04
-    timeout-minutes: 75
+    timeout-minutes: 90
+    outputs:
+      resolved_version: ${{ steps.meta.outputs.resolved_version }}
+      build_name: ${{ steps.meta.outputs.build_name }}
+      artifact_tuple: ${{ steps.meta.outputs.artifact_tuple }}
+      artifact_id: ${{ steps.meta.outputs.artifact_id }}
+      image_artifact: ${{ steps.meta.outputs.image_artifact }}
+      log_artifact: ${{ steps.meta.outputs.log_artifact }}
+      run_test: ${{ steps.tests.outputs.run_test }}
+      run_readiness: ${{ steps.tests.outputs.run_readiness }}
+      requested_dataplane: ${{ steps.tests.outputs.requested_dataplane }}
+      run_dataplane: ${{ steps.tests.outputs.run_dataplane }}
+      dataplane_skip_reason: ${{ steps.tests.outputs.dataplane_skip_reason }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -97,12 +137,65 @@ jobs:
             source build.env
             resolved_version="$LANDSCAPE_VERSION"
           fi
-          artifact_id="${{ inputs.variant }}-${resolved_version}-${GITHUB_SHA::12}-${GITHUB_RUN_ID}"
+
+          build_name="landscape-mini-x86-${{ inputs.base_system }}"
+          if [ "${{ inputs.include_docker }}" = "true" ]; then
+            build_name="${build_name}-docker"
+          fi
+
+          artifact_tuple="${{ inputs.base_system }}-docker-${{ inputs.include_docker }}"
+          artifact_id="${artifact_tuple}-${resolved_version}-${GITHUB_SHA::12}-${GITHUB_RUN_ID}"
           {
             echo "resolved_version=$resolved_version"
+            echo "build_name=$build_name"
+            echo "artifact_tuple=$artifact_tuple"
             echo "artifact_id=$artifact_id"
-            echo "image_artifact=landscape-mini-x86-${artifact_id}"
-            echo "log_artifact=test-logs-${artifact_id}"
+            echo "image_artifact=landscape-mini-x86-$artifact_id"
+            echo "log_artifact=test-logs-$artifact_id"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Normalize requested tests
+        id: tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          requested="${{ inputs.run_test }}"
+          normalized="${requested,,}"
+          normalized="${normalized//[[:space:]]/}"
+
+          run_readiness=false
+          requested_dataplane=false
+          run_dataplane=false
+          dataplane_skip_reason=
+
+          case "$normalized" in
+            ""|none)
+              normalized=none
+              ;;
+            readiness)
+              run_readiness=true
+              ;;
+            readiness,dataplane)
+              run_readiness=true
+              requested_dataplane=true
+              if [ "${{ inputs.include_docker }}" = "true" ]; then
+                dataplane_skip_reason="Dataplane is only available for include_docker=false builds"
+              else
+                run_dataplane=true
+              fi
+              ;;
+            *)
+              echo "Unsupported run_test value: $requested" >&2
+              exit 1
+              ;;
+          esac
+
+          {
+            echo "run_test=$normalized"
+            echo "run_readiness=$run_readiness"
+            echo "requested_dataplane=$requested_dataplane"
+            echo "run_dataplane=$run_dataplane"
+            echo "dataplane_skip_reason=$dataplane_skip_reason"
           } >> "$GITHUB_OUTPUT"
 
       - name: Render effective topology config
@@ -117,16 +210,248 @@ jobs:
           mkdir -p output/metadata
           bash .github/scripts/render-effective-topology.sh output/metadata/effective-landscape_init.toml
 
-      - name: Maximize build space
+      - name: Install build dependencies
+        timeout-minutes: 15
+        shell: bash
         run: |
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /usr/local/lib/android
-          sudo rm -rf /opt/ghc
-          sudo rm -rf /usr/local/share/boost
-          sudo rm -rf "$AGENT_TOOLSDIRECTORY"
-          df -h
+          set -euo pipefail
 
-      - name: Install dependencies
+          apt_retry() {
+            local attempt
+            for attempt in 1 2 3 4 5; do
+              if timeout --foreground 1m "$@"; then
+                return 0
+              fi
+              if [ "$attempt" -eq 5 ]; then
+                echo "Command failed after ${attempt} attempts: $*" >&2
+                return 1
+              fi
+              echo "Command failed or timed out on attempt ${attempt}, retrying: $*" >&2
+            done
+          }
+
+          apt_retry sudo apt-get \
+            -o Acquire::Retries=3 \
+            -o Acquire::http::Timeout=60 \
+            -o Acquire::https::Timeout=60 \
+            update
+
+          apt_retry sudo apt-get \
+            -o Acquire::Retries=3 \
+            -o Acquire::http::Timeout=60 \
+            -o Acquire::https::Timeout=60 \
+            install -y debootstrap parted dosfstools e2fsprogs \
+            grub-efi-amd64-bin grub-pc-bin qemu-utils rsync curl
+
+      - name: Build image (${{ inputs.base_system }}, docker=${{ inputs.include_docker }})
+        timeout-minutes: 9
+        env:
+          RESOLVED_VERSION: ${{ steps.meta.outputs.resolved_version }}
+          EFFECTIVE_CONFIG_PATH: ${{ github.workspace }}/output/metadata/effective-landscape_init.toml
+          EFFECTIVE_CONFIG_PROFILE: ${{ inputs.config_profile }}
+          EFFECTIVE_TOPOLOGY_SOURCE: ${{ inputs.topology_source }}
+          ROOT_PASSWORD: ${{ inputs.root_password }}
+          ROOT_PASSWORD_SOURCE: ${{ inputs.root_password_source }}
+          LANDSCAPE_ADMIN_USER: ${{ inputs.api_username }}
+          LANDSCAPE_ADMIN_USER_SOURCE: ${{ inputs.api_username_source }}
+          LANDSCAPE_ADMIN_PASS: ${{ inputs.api_password }}
+          LANDSCAPE_ADMIN_PASS_SOURCE: ${{ inputs.api_password_source }}
+          RUN_TEST: ${{ steps.tests.outputs.run_test }}
+          RELEASE_CHANNEL: ${{ inputs.release_channel }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          REPOSITORY_OWNER: ${{ inputs.repository_owner }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          version_flag=()
+          if [ -n "${RESOLVED_VERSION}" ]; then
+            version_flag=(--version "${RESOLVED_VERSION}")
+          fi
+
+          format_flags=()
+          IFS=',' read -r -a requested_formats <<< "${{ inputs.output_formats }}"
+          for fmt in "${requested_formats[@]}"; do
+            fmt="${fmt//[[:space:]]/}"
+            [ -n "$fmt" ] || continue
+            format_flags+=(--output-format "$fmt")
+          done
+
+          config_backup="$(mktemp)"
+          cp "${EFFECTIVE_CONFIG_PATH}" "$config_backup"
+          trap 'rm -f "$config_backup"' EXIT
+
+          run_build() {
+            timeout --foreground 4m \
+              sudo APT_MIRROR="" ALPINE_MIRROR="" \
+              EFFECTIVE_CONFIG_PATH="${EFFECTIVE_CONFIG_PATH}" \
+              EFFECTIVE_CONFIG_PROFILE="${EFFECTIVE_CONFIG_PROFILE}" \
+              EFFECTIVE_TOPOLOGY_SOURCE="${EFFECTIVE_TOPOLOGY_SOURCE}" \
+              ROOT_PASSWORD="${ROOT_PASSWORD}" \
+              ROOT_PASSWORD_SOURCE="${ROOT_PASSWORD_SOURCE}" \
+              LANDSCAPE_ADMIN_USER="${LANDSCAPE_ADMIN_USER}" \
+              LANDSCAPE_ADMIN_USER_SOURCE="${LANDSCAPE_ADMIN_USER_SOURCE}" \
+              LANDSCAPE_ADMIN_PASS="${LANDSCAPE_ADMIN_PASS}" \
+              LANDSCAPE_ADMIN_PASS_SOURCE="${LANDSCAPE_ADMIN_PASS_SOURCE}" \
+              RUN_TEST="none" \
+              RELEASE_CHANNEL="${RELEASE_CHANNEL}" \
+              RELEASE_TAG="${RELEASE_TAG}" \
+              REPOSITORY_OWNER="${REPOSITORY_OWNER}" \
+              ./build.sh \
+              "${version_flag[@]}" \
+              --base-system "${{ inputs.base_system }}" \
+              --include-docker "${{ inputs.include_docker }}" \
+              "${format_flags[@]}"
+          }
+
+          attempt=1
+          until run_build; do
+            status=$?
+            if [ "$attempt" -ge 2 ]; then
+              echo "Build failed after ${attempt} attempts" >&2
+              exit "$status"
+            fi
+
+            echo "Build attempt ${attempt} failed with status ${status}; resetting workspace and retrying..." >&2
+            sudo rm -rf work
+            sudo rm -f output/*.img output/*.vmdk output/*.ova output/metadata/build-metadata.txt
+            mkdir -p output/metadata
+            cp "$config_backup" "${EFFECTIVE_CONFIG_PATH}"
+            attempt=$((attempt + 1))
+          done
+
+      - name: Fix output permissions
+        run: sudo chown -R "$(id -u):$(id -g)" output/ work/
+
+      - name: Capture artifact metadata
+        env:
+          RESOLVED_VERSION: ${{ steps.meta.outputs.resolved_version }}
+          ARTIFACT_ID: ${{ steps.meta.outputs.artifact_id }}
+          BUILD_NAME: ${{ steps.meta.outputs.build_name }}
+          RUN_TEST: ${{ steps.tests.outputs.run_test }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p output/metadata "${TEST_LOG_DIR}"
+
+          metadata_path="output/metadata/build-metadata.txt"
+          if [ -f "$metadata_path" ]; then
+            source "$metadata_path"
+          fi
+
+          image_file="${image_file:-${BUILD_NAME}.img}"
+          produced_files="${produced_files:-$image_file}"
+
+          printf '%s\n' \
+            "base_system=${{ inputs.base_system }}" \
+            "include_docker=${{ inputs.include_docker }}" \
+            "output_formats=${{ inputs.output_formats }}" \
+            "run_test=${RUN_TEST}" \
+            "produced_files=${produced_files}" \
+            "landscape_version=${landscape_version:-${RESOLVED_VERSION}}" \
+            "resolved_version=${RESOLVED_VERSION}" \
+            "artifact_id=${ARTIFACT_ID}" \
+            "artifact_tuple=${{ steps.meta.outputs.artifact_tuple }}" \
+            "git_sha=${GITHUB_SHA}" \
+            "run_id=${GITHUB_RUN_ID}" \
+            "workflow=${GITHUB_WORKFLOW}" \
+            "build_name=${BUILD_NAME}" \
+            "image_file=${image_file}" \
+            "config_profile=${{ inputs.config_profile }}" \
+            "topology_source=${{ inputs.topology_source }}" \
+            "release_channel=${{ inputs.release_channel }}" \
+            "release_tag=${{ inputs.release_tag }}" \
+            "repository_owner=${{ inputs.repository_owner }}" \
+            "root_password_source=${{ inputs.root_password_source }}" \
+            "api_username_source=${{ inputs.api_username_source }}" \
+            "api_password_source=${{ inputs.api_password_source }}" \
+            "resolved_apt_mirror=${resolved_apt_mirror:-unused}" \
+            "resolved_apt_mirror_source=${resolved_apt_mirror_source:-unused}" \
+            "resolved_alpine_mirror=${resolved_alpine_mirror:-unused}" \
+            "resolved_alpine_mirror_source=${resolved_alpine_mirror_source:-unused}" \
+            "resolved_docker_apt_mirror=${resolved_docker_apt_mirror:-unused}" \
+            "resolved_docker_apt_mirror_source=${resolved_docker_apt_mirror_source:-unused}" \
+            "resolved_docker_apt_gpg_url=${resolved_docker_apt_gpg_url:-unused}" \
+            "resolved_docker_apt_gpg_url_source=${resolved_docker_apt_gpg_url_source:-unused}" \
+            "timestamp_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            > output/metadata/build-metadata.txt
+
+          cp output/metadata/build-metadata.txt "${TEST_LOG_DIR}/build-metadata.txt"
+          if [ -f output/metadata/effective-landscape_init.toml ]; then
+            cp output/metadata/effective-landscape_init.toml "${TEST_LOG_DIR}/effective-landscape_init.toml"
+          fi
+
+      - name: Record test selection
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "${TEST_LOG_DIR}"
+          printf '%s\n' \
+            "run_test=${{ steps.tests.outputs.run_test }}" \
+            "run_readiness=${{ steps.tests.outputs.run_readiness }}" \
+            "requested_dataplane=${{ steps.tests.outputs.requested_dataplane }}" \
+            "run_dataplane=${{ steps.tests.outputs.run_dataplane }}" \
+            "dataplane_skip_reason=${{ steps.tests.outputs.dataplane_skip_reason }}" \
+            > "${TEST_LOG_DIR}/test-selection.txt"
+
+          if [ "${{ steps.tests.outputs.requested_dataplane }}" = "true" ] && [ "${{ steps.tests.outputs.run_dataplane }}" != "true" ]; then
+            printf '%s\n' \
+              "base_system=${{ inputs.base_system }}" \
+              "include_docker=${{ inputs.include_docker }}" \
+              "run_test=${{ steps.tests.outputs.run_test }}" \
+              "reason=${{ steps.tests.outputs.dataplane_skip_reason }}" \
+              > "${TEST_LOG_DIR}/dataplane-skipped.txt"
+          fi
+
+      - name: List outputs
+        run: ls -lh output/
+
+      - name: Upload image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.meta.outputs.image_artifact }}
+          path: |
+            output/*.img
+            output/*.vmdk
+            output/*.ova
+            output/metadata/build-metadata.txt
+            output/metadata/effective-landscape_init.toml
+          retention-days: ${{ inputs.image_retention_days }}
+
+      - name: Upload build log fragment
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.meta.outputs.log_artifact }}-build
+          path: output/test-logs/
+          retention-days: ${{ inputs.log_retention_days }}
+
+  test_readiness:
+    needs: build_image
+    if: ${{ needs.build_image.outputs.run_readiness == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build_image.outputs.image_artifact }}
+          path: output/
+
+      - name: Restore build metadata into test logs
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p output/test-logs
+          cp output/metadata/build-metadata.txt output/test-logs/build-metadata.txt
+          if [ -f output/metadata/effective-landscape_init.toml ]; then
+            cp output/metadata/effective-landscape_init.toml output/test-logs/effective-landscape_init.toml
+          fi
+
+      - name: Install test dependencies
         timeout-minutes: 10
         shell: bash
         run: |
@@ -156,125 +481,161 @@ jobs:
             -o Acquire::Retries=3 \
             -o Acquire::http::Timeout=60 \
             -o Acquire::https::Timeout=60 \
-            install -y debootstrap parted dosfstools e2fsprogs \
-            grub-efi-amd64-bin grub-pc-bin qemu-utils rsync curl \
-            sshpass socat jq qemu-system-x86 ovmf
-
-      - name: Build image (${{ inputs.variant }})
-        env:
-          RESOLVED_VERSION: ${{ steps.meta.outputs.resolved_version }}
-          EFFECTIVE_CONFIG_PATH: ${{ github.workspace }}/output/metadata/effective-landscape_init.toml
-          EFFECTIVE_CONFIG_PROFILE: ${{ inputs.config_profile }}
-          EFFECTIVE_TOPOLOGY_SOURCE: ${{ inputs.topology_source }}
-          ROOT_PASSWORD: ${{ inputs.root_password }}
-          ROOT_PASSWORD_SOURCE: ${{ inputs.root_password_source }}
-          LANDSCAPE_ADMIN_USER: ${{ inputs.api_username }}
-          LANDSCAPE_ADMIN_USER_SOURCE: ${{ inputs.api_username_source }}
-          LANDSCAPE_ADMIN_PASS: ${{ inputs.api_password }}
-          LANDSCAPE_ADMIN_PASS_SOURCE: ${{ inputs.api_password_source }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          version_flag=()
-          if [ -n "${RESOLVED_VERSION}" ]; then
-            version_flag=(--version "${RESOLVED_VERSION}")
-          fi
-          sudo APT_MIRROR="" ALPINE_MIRROR="" OUTPUT_FORMAT=img COMPRESS_OUTPUT=no \
-            EFFECTIVE_CONFIG_PATH="${EFFECTIVE_CONFIG_PATH}" \
-            EFFECTIVE_CONFIG_PROFILE="${EFFECTIVE_CONFIG_PROFILE}" \
-            EFFECTIVE_TOPOLOGY_SOURCE="${EFFECTIVE_TOPOLOGY_SOURCE}" \
-            ROOT_PASSWORD="${ROOT_PASSWORD}" \
-            ROOT_PASSWORD_SOURCE="${ROOT_PASSWORD_SOURCE}" \
-            LANDSCAPE_ADMIN_USER="${LANDSCAPE_ADMIN_USER}" \
-            LANDSCAPE_ADMIN_USER_SOURCE="${LANDSCAPE_ADMIN_USER_SOURCE}" \
-            LANDSCAPE_ADMIN_PASS="${LANDSCAPE_ADMIN_PASS}" \
-            LANDSCAPE_ADMIN_PASS_SOURCE="${LANDSCAPE_ADMIN_PASS_SOURCE}" \
-            ./build.sh "${version_flag[@]}" ${{ inputs.build_flags }}
-
-      - name: Fix output permissions
-        run: sudo chown -R "$(id -u):$(id -g)" output/ work/
-
-      - name: Capture artifact metadata
-        env:
-          RESOLVED_VERSION: ${{ steps.meta.outputs.resolved_version }}
-          ARTIFACT_ID: ${{ steps.meta.outputs.artifact_id }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p output/metadata "${TEST_LOG_DIR}"
-          image_file="$(ls output/*.img)"
-          image_base="$(basename "$image_file")"
-          printf '%s\n' \
-            "variant=${{ inputs.variant }}" \
-            "resolved_version=${RESOLVED_VERSION}" \
-            "artifact_id=${ARTIFACT_ID}" \
-            "git_sha=${GITHUB_SHA}" \
-            "run_id=${GITHUB_RUN_ID}" \
-            "workflow=${GITHUB_WORKFLOW}" \
-            "image_file=${image_base}" \
-            "config_profile=${{ inputs.config_profile }}" \
-            "topology_source=${{ inputs.topology_source }}" \
-            "root_password_source=${{ inputs.root_password_source }}" \
-            "api_username_source=${{ inputs.api_username_source }}" \
-            "api_password_source=${{ inputs.api_password_source }}" \
-            "api_username=${{ inputs.api_username }}" \
-            > output/metadata/build-metadata.txt
-          cp output/metadata/build-metadata.txt "${TEST_LOG_DIR}/build-metadata.txt"
+            install -y sshpass socat curl jq qemu-system-x86 ovmf qemu-utils
 
       - name: List outputs
         run: ls -lh output/
 
-      - name: Upload image artifact
+      - name: Run readiness checks (${{ inputs.base_system }}, docker=${{ inputs.include_docker }})
+        env:
+          LANDSCAPE_TEST_BASE_SYSTEM: ${{ inputs.base_system }}
+          LANDSCAPE_TEST_INCLUDE_DOCKER: ${{ inputs.include_docker }}
+          LANDSCAPE_TEST_OUTPUT_FORMATS: ${{ inputs.output_formats }}
+          LANDSCAPE_TEST_RUN_TEST: ${{ needs.build_image.outputs.run_test }}
+          LANDSCAPE_TEST_RELEASE_CHANNEL: ${{ inputs.release_channel }}
+          LANDSCAPE_TEST_ARTIFACT_ID: ${{ needs.build_image.outputs.artifact_id }}
+          LANDSCAPE_TEST_LANDSCAPE_VERSION: ${{ needs.build_image.outputs.resolved_version }}
+          LANDSCAPE_EFFECTIVE_INIT_CONFIG: output/metadata/effective-landscape_init.toml
+          SSH_PASSWORD: ${{ inputs.root_password }}
+          API_USERNAME: ${{ inputs.api_username }}
+          API_PASSWORD: ${{ inputs.api_password }}
+        run: timeout --foreground 20m ./tests/test-readiness.sh output/${{ needs.build_image.outputs.build_name }}.img
+
+      - name: Upload readiness log fragment
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ steps.meta.outputs.image_artifact }}
-          path: |
-            output/*.img
-            output/metadata/build-metadata.txt
-            output/metadata/effective-landscape_init.toml
-          retention-days: ${{ inputs.image_retention_days }}
+          name: ${{ needs.build_image.outputs.log_artifact }}-readiness
+          path: output/test-logs/
+          retention-days: ${{ inputs.log_retention_days }}
 
-      - name: Run readiness checks (${{ inputs.variant }})
-        env:
-          LANDSCAPE_TEST_VARIANT: ${{ inputs.variant }}
-          LANDSCAPE_TEST_ARTIFACT_ID: ${{ steps.meta.outputs.artifact_id }}
-          LANDSCAPE_TEST_LANDSCAPE_VERSION: ${{ steps.meta.outputs.resolved_version }}
-          LANDSCAPE_EFFECTIVE_INIT_CONFIG: output/metadata/effective-landscape_init.toml
-          SSH_PASSWORD: ${{ inputs.root_password }}
-          API_USERNAME: ${{ inputs.api_username }}
-          API_PASSWORD: ${{ inputs.api_password }}
-        run: timeout --foreground 20m ./tests/test-readiness.sh output/*.img
+  test_dataplane:
+    needs: build_image
+    if: ${{ needs.build_image.outputs.run_dataplane == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Run dataplane tests (${{ inputs.variant }})
-        if: ${{ inputs.run_e2e }}
-        env:
-          LANDSCAPE_TEST_VARIANT: ${{ inputs.variant }}
-          LANDSCAPE_TEST_ARTIFACT_ID: ${{ steps.meta.outputs.artifact_id }}
-          LANDSCAPE_TEST_LANDSCAPE_VERSION: ${{ steps.meta.outputs.resolved_version }}
-          LANDSCAPE_EFFECTIVE_INIT_CONFIG: output/metadata/effective-landscape_init.toml
-          SSH_PASSWORD: ${{ inputs.root_password }}
-          API_USERNAME: ${{ inputs.api_username }}
-          API_PASSWORD: ${{ inputs.api_password }}
-        run: timeout --foreground 25m ./tests/test-dataplane.sh output/*.img
+      - name: Download image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build_image.outputs.image_artifact }}
+          path: output/
 
-      - name: Mark E2E not scheduled for this variant
-        if: ${{ !inputs.run_e2e }}
-        env:
-          ARTIFACT_ID: ${{ steps.meta.outputs.artifact_id }}
+      - name: Restore build metadata into test logs
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p "${TEST_LOG_DIR}"
-          printf '%s\n' \
-            "variant=${{ inputs.variant }}" \
-            "artifact_id=${ARTIFACT_ID}" \
-            "reason=E2E reserved for representative coverage only" \
-            > "${TEST_LOG_DIR}/e2e-skipped.txt"
+          mkdir -p output/test-logs
+          cp output/metadata/build-metadata.txt output/test-logs/build-metadata.txt
+          if [ -f output/metadata/effective-landscape_init.toml ]; then
+            cp output/metadata/effective-landscape_init.toml output/test-logs/effective-landscape_init.toml
+          fi
+
+      - name: Install test dependencies
+        timeout-minutes: 10
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          apt_retry() {
+            local attempt
+            for attempt in 1 2 3; do
+              if "$@"; then
+                return 0
+              fi
+              if [ "$attempt" -eq 3 ]; then
+                echo "Command failed after ${attempt} attempts: $*" >&2
+                return 1
+              fi
+              echo "Command failed on attempt ${attempt}, retrying: $*" >&2
+            done
+          }
+
+          apt_retry sudo apt-get \
+            -o Acquire::Retries=3 \
+            -o Acquire::http::Timeout=60 \
+            -o Acquire::https::Timeout=60 \
+            update
+
+          apt_retry sudo apt-get \
+            -o Acquire::Retries=3 \
+            -o Acquire::http::Timeout=60 \
+            -o Acquire::https::Timeout=60 \
+            install -y sshpass socat curl jq qemu-system-x86 ovmf qemu-utils
+
+      - name: List outputs
+        run: ls -lh output/
+
+      - name: Run dataplane tests (${{ inputs.base_system }}, docker=${{ inputs.include_docker }})
+        env:
+          LANDSCAPE_TEST_BASE_SYSTEM: ${{ inputs.base_system }}
+          LANDSCAPE_TEST_INCLUDE_DOCKER: ${{ inputs.include_docker }}
+          LANDSCAPE_TEST_OUTPUT_FORMATS: ${{ inputs.output_formats }}
+          LANDSCAPE_TEST_RUN_TEST: ${{ needs.build_image.outputs.run_test }}
+          LANDSCAPE_TEST_RELEASE_CHANNEL: ${{ inputs.release_channel }}
+          LANDSCAPE_TEST_ARTIFACT_ID: ${{ needs.build_image.outputs.artifact_id }}
+          LANDSCAPE_TEST_LANDSCAPE_VERSION: ${{ needs.build_image.outputs.resolved_version }}
+          LANDSCAPE_EFFECTIVE_INIT_CONFIG: output/metadata/effective-landscape_init.toml
+          SSH_PASSWORD: ${{ inputs.root_password }}
+          API_USERNAME: ${{ inputs.api_username }}
+          API_PASSWORD: ${{ inputs.api_password }}
+        run: timeout --foreground 25m ./tests/test-dataplane.sh output/${{ needs.build_image.outputs.build_name }}.img
+
+      - name: Upload dataplane log fragment
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ needs.build_image.outputs.log_artifact }}-dataplane
+          path: output/test-logs/
+          retention-days: ${{ inputs.log_retention_days }}
+
+  merge_validation_logs:
+    needs:
+      - build_image
+      - test_readiness
+      - test_dataplane
+    if: ${{ always() && needs.build_image.result == 'success' }}
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Download build log fragment
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build_image.outputs.log_artifact }}-build
+          path: output/test-logs/build/
+
+      - name: Download readiness log fragment
+        if: ${{ needs.build_image.outputs.run_readiness == 'true' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build_image.outputs.log_artifact }}-readiness
+          path: output/test-logs/readiness/
+
+      - name: Download dataplane log fragment
+        if: ${{ needs.build_image.outputs.run_dataplane == 'true' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build_image.outputs.log_artifact }}-dataplane
+          path: output/test-logs/dataplane/
+
+      - name: Merge validation logs
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p output/final-test-logs
+          for dir in output/test-logs/build output/test-logs/readiness output/test-logs/dataplane; do
+            if [ -d "$dir" ]; then
+              cp -a "$dir"/. output/final-test-logs/
+            fi
+          done
+          ls -lh output/final-test-logs
 
       - name: Upload validation logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ steps.meta.outputs.log_artifact }}
-          path: output/test-logs/
+          name: ${{ needs.build_image.outputs.log_artifact }}
+          path: output/final-test-logs/
           retention-days: ${{ inputs.log_retention_days }}

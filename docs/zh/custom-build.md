@@ -4,22 +4,17 @@
 
 如果你只是想 **快速做出一份自己的镜像**，最推荐的方式就是用 GitHub Actions 里的 **Custom Build**。
 
-你可以把它理解成：
+现在它采用的是显式组合模型：
 
-> 不用自己配本地构建环境，直接在网页上填几个参数，然后等 GitHub 帮你把镜像做好。
+- `base_system`
+- `include_docker`
+- `output_formats`
 
-通常情况下：
-
-- 只跑构建时，大约需要 **5 分钟左右**
-- 如果包含测试，通常需要 **10 分钟左右**
-
-如果你只是想先**快速体验 Landscape**，不急着改参数，推荐直接去仓库的 **Release** 页面下载我们已经预编译好的镜像，这会更快。
+也就是说，你不是在选旧的 `variant` 名字，而是在明确地描述你要什么镜像。
 
 ---
 
 ## 3 分钟快速上手
-
-如果你是第一次用，直接按下面做就行。
 
 ### 第一步：打开 Actions
 
@@ -31,26 +26,32 @@
 
 ---
 
-### 第二步：选一个 variant
+### 第二步：选基础组合
 
-如果你不确定选哪个，先用：
+第一次使用，推荐直接选：
 
-- `default`
+- `base_system=debian`
+- `include_docker=false`
+- `output_formats=img`
 
 常见选择可以这样理解：
 
-- `default`：最通用，推荐第一次先用它
-- `docker`：镜像里会带 Docker
-- `alpine`：更轻量
-- `alpine-docker`：轻量 + Docker
+- `debian + false`：最通用，推荐第一次先用它
+- `debian + true`：带 Docker 的 Debian 镜像
+- `alpine + false`：更轻量
+- `alpine + true`：更轻量，同时带 Docker
 
-如果你只是想先成功构建一版，**直接选 `default`**。
+输出格式建议：
+
+- `img`：最通用，测试和 raw 导盘都靠它
+- `vmdk`：适合需要 VMDK 的场景
+- `pve-ova`：适合 PVE 导入
+
+如果你只是想先成功构建一版，**直接用 `debian + false + img`**。
 
 ---
 
 ### 第三步：按需填写参数
-
-最常见的情况是两种。
 
 #### 情况 A：只改网络
 
@@ -61,33 +62,6 @@
 - `lan_range_end=192.168.50.200`
 - `lan_netmask=24`
 
-这些参数分别可以这样理解：
-
-- `lan_server_ip`
-  - 路由器在 LAN 里的地址
-  - 一般也会作为网关 / DHCP 服务地址
-  - 常见写法：`192.168.50.1`
-
-- `lan_range_start`
-  - DHCP 自动分配的起始地址
-  - 常见写法：`192.168.50.100`
-
-- `lan_range_end`
-  - DHCP 自动分配的结束地址
-  - 常见写法：`192.168.50.200`
-
-- `lan_netmask`
-  - 子网前缀长度
-  - 大多数情况直接用 `24`
-
-填写时注意：
-
-- `lan_server_ip` 不要和 DHCP 地址池重复
-- `lan_range_start` / `lan_range_end` 要在同一网段里
-- 如果你不懂子网，通常直接填 `24` 就够了
-
-其他保持默认或留空即可。
-
 #### 情况 B：同时改密码
 
 如果你还想顺便改登录密码和 Web 管理账号，可以再填：
@@ -96,40 +70,27 @@
 - `api_username=admin`
 - `api_password=Adm1n!234`
 
-这些参数分别是：
+#### 情况 C：顺手选测试
 
-- `root_password`
-  - Linux 系统登录密码
-  - 会影响：
-    - `root`
-    - `ld`
+你还可以用 `run_test` 控制这次构建后要不要自动验证：
 
-- `api_username`
-  - Web 管理用户名
+- 留空 / `none`：只构建
+- `readiness`
+- `readiness,dataplane`
 
-- `api_password`
-  - Web 管理密码
+注意：
 
-如果你只是个人使用、临时测试，直接填也可以。
-
-如果你比较在意安全，建议把这些值放到 GitHub Secrets 里，而不是直接填在输入框中。
+- `include_docker=true` 时，如果请求了 dataplane，会明确 skip，并在日志里说明原因
 
 #### 其他常见输入
 
 - `landscape_version`
   - 指定要使用的 Landscape 版本
   - 留空时使用仓库默认值
-  - 如果你不确定，通常直接留空
 
 当前优先级是：
 
 **direct inputs > secrets > defaults**
-
-也就是说：
-
-- 你手动填了输入框，就优先用输入框
-- 没填，才会尝试读取 GitHub Secrets
-- Secrets 也没有，才回退到默认值
 
 ---
 
@@ -139,74 +100,68 @@
 
 - **Run workflow**
 
-然后等待 GitHub Actions 开始执行。
-
 ---
 
-### 第五步：下载构建结果
+### 第五步：获取最近一次成功构建的下载链接
 
-等 workflow 跑完后：
+workflow 跑完后，你仍然可以下载 Artifacts。
 
-- 打开这次运行记录
-- 在页面下方找到 **Artifacts**
-- 下载对应的构建产物
+但现在更推荐直接使用固定 release 入口：
+
+- Release 页面：`https://github.com/<owner>/landscape-mini/releases/tag/custom-build-latest`
+- 下载直链：`https://github.com/<owner>/landscape-mini/releases/download/custom-build-latest/<asset>`
+
+这个固定 release 始终指向“最近一次成功的 Custom Build”，而不是按 tuple 长久保留的独立下载位：
+
+- 旧 assets 会先删除
+- 再上传最近一次成功构建的新 assets
+- `build-metadata.txt` 和 `effective-landscape_init.toml` 也会一起更新
+
+所以如果你先跑 Debian，后跑 Alpine，后一次 Alpine 成功构建就会覆盖同一个 tag 下原先的 Debian 产物。
 
 你拿到的通常会包含：
 
-- 镜像文件 `.img`
+- raw 镜像 `.img` 或重命名后的稳定产物
 - 构建元信息 `build-metadata.txt`
 - 生效配置 `effective-landscape_init.toml`
+- 如果你请求了额外格式，还会包含 `.vmdk` / `.ova`
 
-如果你只是想拿镜像用，重点看 `.img` 就可以。
-
----
-
-## Tips
-
-- 如果你只是想先确认镜像能不能构建出来，不一定要等完整测试全部结束。
-- 只要本次运行里对应的镜像 artifact 已经上传完成，你就可以先下载试用。
-- 如果你只是想快速体验，不改参数的话，通常直接去 **Release** 页面下载预编译镜像更省事。
-- 第一次使用时，最稳妥的选择仍然是：`variant=default`，其余只改你真正关心的参数。
-- 如果你准备长期使用，或者比较在意安全，建议把密码放到 GitHub Secrets 里。
+如果你需要不可变、按次构建区分的产物，请使用对应 workflow run 的 Artifacts，或记录它的 `run_id` / `artifact_id`。
 
 ---
 
-## 什么时候用 Custom Build，什么时候不用
+## 如何选组合
 
-### 推荐用 Custom Build
+### 我第一次应该怎么选？
 
-如果你符合下面这些情况，优先推荐使用 Custom Build：
+建议：
 
-- 你 fork 了这个仓库，想生成自己的镜像
-- 你不想折腾本地 Linux 构建环境
-- 你希望直接在网页上点几下就完成构建
-- 你只想改一些常用参数，而不是改代码
+- `base_system=debian`
+- `include_docker=false`
+- `output_formats=img`
 
-### 更适合本地构建
+### 我想要 Docker
 
-如果你是下面这些情况，本地更合适：
+把：
 
-- 你在修改 `build.sh`、`lib/`、`rootfs/`、测试脚本
-- 你在开发 workflow 本身
-- 你需要频繁调试
-- 你要验证还没推送到 GitHub 的本地代码
+- `include_docker=true`
 
-简单说：
+### 我想要更轻量
 
-- **想生成镜像** → 优先 Custom Build
-- **想开发构建系统本身** → 本地构建
+把：
 
----
+- `base_system=alpine`
 
-## 密码怎么处理更合适
+### 我想导入 PVE
 
-这里给一个最简单的判断方式。
+把：
 
-### 如果你只是自己临时用
-可以直接填输入框。
+- `output_formats=img,pve-ova`
 
-### 如果你准备长期使用，或者比较在意安全
-建议改用 GitHub Secrets。
+这样你同时拥有：
+
+- 便于测试和兜底的 raw `.img`
+- 直接导入用的 `.ova`
 
 ---
 
@@ -222,39 +177,41 @@
 - 补做 readiness / dataplane 验证
 - 重新传 SSH / API 凭据测试
 
-你可以把它理解成：
+现在复测入口使用的是：
 
-> Custom Build 负责“生成镜像”，Test Image 负责“再检查一次镜像”。
+- `run_id`
+- `artifact_id`
+
+也就是说，复测直接对准某次构建产物本身，而不是依赖旧的后缀命名约定。
 
 ---
 
 ## 常见问题
 
-### 我第一次到底选哪个 variant？
+### 我第一次到底选哪个？
 
 直接选：
 
-- `default`
+- `base_system=debian`
+- `include_docker=false`
+- `output_formats=img`
 
-### `landscape_version` 我看不懂，要不要填？
+### `pve-ova` 是不是会替代 `.img`？
 
-一般不用填，留空即可。
+不会。
 
-### 我只想改 LAN 网段，其他不动，可以吗？
+推荐仍然保留 `img`，然后按需再加 `pve-ova`。
 
-可以，直接只填网络相关参数即可。
+### dataplane 为什么有时不会跑？
 
-### 我一定要用 Secrets 吗？
+规则是：
 
-不一定。
+- `run_test=` 或 `run_test=none` → 不测试
+- `run_test=readiness` → 只跑 readiness
+- `run_test=readiness,dataplane` 且 `include_docker=false` → 跑 readiness + dataplane
+- `run_test=readiness,dataplane` 且 `include_docker=true` → dataplane 明确 skip
 
-个人 fork、临时测试，或者更看重方便时，直接在输入框里填写也可以。
-
-如果你更在意安全，再考虑用 Secrets。
-
-### 我跑完后去哪里拿镜像？
-
-去这次 workflow 的运行页面，在 **Artifacts** 里下载。
+这不是按旧 variant 名字判断，而是按统一测试契约和能力规则判断。
 
 ---
 
@@ -264,6 +221,8 @@
 
 > **“我想尽快做出一份自己的镜像。”**
 
-那就先用 **Custom Build**，不要先从本地构建开始。
+那就先用：
 
-先把镜像做出来，再决定要不要继续折腾更复杂的自定义。
+- `debian + no-docker + img`
+
+先把第一份镜像做出来，再决定要不要加 Docker、换 Alpine 或增加 `vmdk` / `pve-ova`。

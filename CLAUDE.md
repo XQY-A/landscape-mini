@@ -8,6 +8,7 @@ Landscape Mini builds minimal x86 images for Landscape Router.
 
 - Base systems: Debian Trixie / Alpine Linux
 - Boot: BIOS + UEFI
+- Build identity model: `base_system + include_docker + output_formats`
 - Upstream project: https://github.com/ThisSeanZhang/landscape
 
 ## Start here
@@ -31,14 +32,15 @@ Choose the path that matches the user’s goal:
 ## Common Commands
 
 ```bash
-make deps           # install local build deps
-make deps-test      # install local test deps
-make build          # build Debian image
-make build-alpine   # build Alpine image
-make test           # Debian readiness
-make test-dataplane # Debian dataplane
-make test-serial    # boot image in QEMU serial mode
-make ssh            # SSH into local QEMU on port 2222
+make deps
+make deps-test
+make build
+make build BASE_SYSTEM=alpine
+make build INCLUDE_DOCKER=true OUTPUT_FORMATS=img,pve-ova
+make test
+make test-dataplane
+make test-serial
+make ssh
 ```
 
 ## Defaults and important inputs
@@ -50,45 +52,38 @@ make ssh            # SSH into local QEMU on port 2222
 - Default Web UI login:
   - `root` / `root`
 - Common build env overrides:
+  - `BASE_SYSTEM`
+  - `INCLUDE_DOCKER`
+  - `OUTPUT_FORMATS`
   - `ROOT_PASSWORD`
   - `LANDSCAPE_ADMIN_USER`
   - `LANDSCAPE_ADMIN_PASS`
   - `EFFECTIVE_CONFIG_PATH`
   - `APT_MIRROR`
   - `ALPINE_MIRROR`
-  - `OUTPUT_FORMAT`
   - `COMPRESS_OUTPUT`
 
 ## Build and test contract
 
-Keep these current behaviors in mind:
-
 - CI and Custom Build both use `.github/workflows/_build-and-validate.yml`
 - Each image artifact must include:
-  - `.img`
+  - raw `.img`
   - `build-metadata.txt`
   - `effective-landscape_init.toml`
-- Tests should use the effective topology config, not assume only repo default config
-- Tests take credentials from env vars instead of hardcoded values:
-  - `SSH_PASSWORD`
-  - `API_USERNAME`
-  - `API_PASSWORD`
+- Tests should use effective topology config and build metadata
+- Dataplane scheduling rule:
+  - `include_docker=false` → run dataplane
+  - `include_docker=true` → readiness only
 
 ## CI/CD summary
 
 ### CI
 
-`ci.yml` builds 4 variants:
+`ci.yml` now validates only 1 automatic tuple:
 
-- `default`
-- `docker`
-- `alpine`
-- `alpine-docker`
+- `debian + false`
 
-Coverage rule:
-
-- `default` / `alpine`: readiness + dataplane
-- `docker` / `alpine-docker`: readiness only, E2E explicitly skipped
+Automatic CI requests only `img` output and runs `readiness,dataplane`.
 
 ### Custom Build
 
@@ -96,7 +91,9 @@ Coverage rule:
 
 Supports:
 
-- single variant build
+- `base_system`
+- `include_docker`
+- `output_formats`
 - `landscape_version`
 - LAN / DHCP inputs
 - Linux password
@@ -114,19 +111,12 @@ Secrets names:
 
 ### Retest
 
-`test.yml` retests existing CI artifacts by `run_id` or artifact suffix and allows credentials to be passed again.
+`test.yml` retests existing CI artifacts by `run_id` or `artifact_id`.
 
 ### Release
 
-`release.yml` does **promotion**, not rebuild.
-
-On `v*` tags it:
-
-- finds the successful `ci.yml` run for the same commit on `main`
-- downloads validated artifacts
-- verifies metadata
-- compresses `.img`
-- creates the GitHub Release
+`release.yml` rebuilds Debian release artifacts on tag pushes instead of promoting CI artifacts.
+It rebuilds both Debian tuples (`include_docker=true/false`) with `img,pve-ova`, validates metadata/config, then publishes `.img.gz` + `.ova`.
 
 ## Key files
 

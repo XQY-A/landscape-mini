@@ -1,10 +1,7 @@
 # Changelog / 变更日志
 
-All notable changes to this project will be documented in this file.
-本文件记录项目的所有重要变更。
-
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
-格式遵循 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 规范。
+This file currently tracks unreleased work and recent notable changes.
+本文件当前记录未发布改动与近期的重要变更。
 
 ## [Unreleased]
 
@@ -14,11 +11,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed / 变更
 
+- Rework automatic CI into a faster validation-only surface that checks only the Debian non-Docker raw `img` path, leaving wider output/export combinations to manual or release workflows / 将自动 CI 收缩为更快的验证面，仅校验 Debian 非 Docker 的 raw `img` 路径，把更宽的输出/导出组合留给手动或 release 工作流
+- Rebuild Debian Docker / non-Docker release artifacts directly on tag pushes instead of promoting CI artifacts from main, while continuing to publish `.img.gz` + `.ova` release assets / 改为在 tag 推送时直接重建 Debian Docker / 非 Docker 发布产物，而不是从 main 上 promote CI artifacts，同时继续发布 `.img.gz` + `.ova` release 资产
 - Rework CI around a reusable single-variant build-and-validate workflow, ship effective topology config inside artifacts, and let tests consume artifact-carried config plus injected credentials / 将 CI 重构为可复用的单变体构建验证流程，把 effective topology 配置随 artifact 一起发布，并让测试使用 artifact 自带配置与注入凭据
-- Promote GitHub releases from already-validated CI artifacts instead of rebuilding on tag pushes / 将 GitHub Release 改为直接基于已验证的 CI artifact 晋级生成，不再在 tag 推送时重新构建
+- Replace the legacy variant model with an explicit build identity model based on `base_system`, `include_docker`, and `output_formats`, update local build UX, rework tests to consume metadata, and fold `pve-ova` into the normal exporter pipeline / 用 `base_system`、`include_docker`、`output_formats` 替换旧的 variant 模型，更新本地构建体验，让测试改为消费 metadata，并将 `pve-ova` 纳入常规导出流水线
+- Rewrite CI, Custom Build, retest, release promotion, and repository docs around tuple-based build identities instead of named variants / 将 CI、Custom Build、复测、release promotion 与仓库文档统一重写为基于 tuple 的构建身份模型，不再围绕命名 variant 运转
 
 ### Fixed / 修复
 
+- Switch image default DNS resolver to `1.1.1.1` while keeping build-time DNS aligned with the active build environment, so CI stays resilient without breaking resumed/offline-friendly workflows / 将镜像默认 DNS 解析器切换为 `1.1.1.1`，同时让构建阶段 DNS 跟随当前构建环境，既增强 CI 稳定性，又避免破坏恢复构建/离线友好流程
+- Add multi-source probing and early-fail mirror resolution so local builds and GitHub CI can select healthy package sources automatically when explicit mirrors are not set, while preserving `--skip-to` source provenance on resumed builds and preferring representative download throughput over raw latency / 新增多源探测与早失败镜像源解析逻辑，使本地构建与 GitHub CI 在未显式指定镜像源时可自动选择健康可用的软件源，在恢复构建时保留 `--skip-to` 的源 provenance，并优先参考代表性下载吞吐而非仅看延迟
+- Let CI inherit configurable Docker mirror settings while making chroot retry steps fail fast on command errors / 让 CI 继承可配置的 Docker 镜像源设置，并让 chroot 重试步骤在命令失败时立即终止
+- Add configurable Debian Docker source settings and retry transient package/network operations during image builds to reduce CI failures from upstream mirror instability / 为 Debian Docker 构建增加可配置的软件源设置，并对镜像构建中的易失败网络/包管理步骤增加重试，降低上游源抖动导致的 CI 失败
+- Retry Debian and Alpine Docker package installation steps during image builds so transient upstream network failures are less likely to fail CI / 在镜像构建期间为 Debian 和 Alpine 的 Docker 安装步骤增加重试，降低上游网络瞬时故障导致 CI 失败的概率
+- Use `C.UTF-8` as the default image locale so Debian and Alpine shells no longer warn about missing `en_US.UTF-8` locale data on first boot / 将镜像默认 locale 改为 `C.UTF-8`，避免 Debian 和 Alpine 首次启动时因缺少 `en_US.UTF-8` locale 数据而出现 shell 警告
 - Stop hardcoding test SSH/API credentials so custom builds and retests can validate non-default passwords consistently / 移除测试中对 SSH/API 凭据的硬编码，使自定义构建与复测能够稳定验证非默认密码
 
 ## [0.2.6] - 2026-04-14

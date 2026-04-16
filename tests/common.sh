@@ -392,30 +392,75 @@ load_landscape_topology() {
     )
 }
 
-landscape_guess_variant_from_image_path() {
-    local image_path="$1"
-    local base
-    base="$(basename "$image_path")"
+LANDSCAPE_TEST_BASE_SYSTEM="${LANDSCAPE_TEST_BASE_SYSTEM:-}"
+LANDSCAPE_TEST_INCLUDE_DOCKER="${LANDSCAPE_TEST_INCLUDE_DOCKER:-}"
+LANDSCAPE_TEST_OUTPUT_FORMATS="${LANDSCAPE_TEST_OUTPUT_FORMATS:-}"
+LANDSCAPE_TEST_RUN_TEST="${LANDSCAPE_TEST_RUN_TEST:-}"
+LANDSCAPE_TEST_RELEASE_CHANNEL="${LANDSCAPE_TEST_RELEASE_CHANNEL:-}"
 
-    case "$base" in
-        *alpine-docker*.img)
-            echo "alpine-docker"
-            ;;
-        *alpine*.img)
-            echo "alpine"
-            ;;
-        *docker*.img)
-            echo "docker"
-            ;;
-        *)
-            echo "default"
-            ;;
-    esac
+load_build_metadata_from_image() {
+    local image_path="$1"
+    local image_dir metadata_path
+
+    image_dir="$(cd "$(dirname "$image_path")" && pwd)"
+    metadata_path="${image_dir}/metadata/build-metadata.txt"
+
+    if [[ ! -f "${metadata_path}" && -f "${PROJECT_DIR:-$(pwd)}/output/metadata/build-metadata.txt" ]]; then
+        metadata_path="${PROJECT_DIR:-$(pwd)}/output/metadata/build-metadata.txt"
+    fi
+
+    if [[ -f "${metadata_path}" ]]; then
+        printf '%s\n' "${metadata_path}"
+        return 0
+    fi
+
+    return 1
 }
 
-landscape_variant_requires_docker() {
-    local variant="${LANDSCAPE_TEST_VARIANT:-${LANDSCAPE_IMAGE_PATH:+$(landscape_guess_variant_from_image_path "${LANDSCAPE_IMAGE_PATH}")}}"
-    [[ "$variant" == *docker* ]]
+landscape_load_test_identity() {
+    local image_path="${1:-${LANDSCAPE_IMAGE_PATH:-}}"
+    local metadata_path key value
+
+    if [[ -n "${LANDSCAPE_TEST_BASE_SYSTEM}" && -n "${LANDSCAPE_TEST_INCLUDE_DOCKER}" && -n "${LANDSCAPE_TEST_OUTPUT_FORMATS}" && -n "${LANDSCAPE_TEST_RUN_TEST}" && -n "${LANDSCAPE_TEST_RELEASE_CHANNEL}" ]]; then
+        return 0
+    fi
+
+    if [[ -z "${image_path}" ]]; then
+        return 1
+    fi
+
+    metadata_path="$(load_build_metadata_from_image "${image_path}")" || return 1
+
+    while IFS='=' read -r key value; do
+        case "${key}" in
+            base_system)
+                LANDSCAPE_TEST_BASE_SYSTEM="${LANDSCAPE_TEST_BASE_SYSTEM:-${value}}"
+                ;;
+            include_docker)
+                LANDSCAPE_TEST_INCLUDE_DOCKER="${LANDSCAPE_TEST_INCLUDE_DOCKER:-${value}}"
+                ;;
+            output_formats)
+                LANDSCAPE_TEST_OUTPUT_FORMATS="${LANDSCAPE_TEST_OUTPUT_FORMATS:-${value}}"
+                ;;
+            run_test)
+                LANDSCAPE_TEST_RUN_TEST="${LANDSCAPE_TEST_RUN_TEST:-${value}}"
+                ;;
+            release_channel)
+                LANDSCAPE_TEST_RELEASE_CHANNEL="${LANDSCAPE_TEST_RELEASE_CHANNEL:-${value}}"
+                ;;
+            artifact_id)
+                LANDSCAPE_TEST_ARTIFACT_ID="${LANDSCAPE_TEST_ARTIFACT_ID:-${value}}"
+                ;;
+            resolved_version)
+                LANDSCAPE_TEST_LANDSCAPE_VERSION="${LANDSCAPE_TEST_LANDSCAPE_VERSION:-${value}}"
+                ;;
+        esac
+    done < "${metadata_path}"
+}
+
+landscape_test_requires_docker() {
+    local include_docker="${LANDSCAPE_TEST_INCLUDE_DOCKER:-}"
+    [[ "${include_docker}" == "true" ]]
 }
 
 # ── Router Harness / Diagnostics ──────────────────────────────────────────────
@@ -462,7 +507,7 @@ landscape_write_test_metadata() {
         image_base="$(basename "$image_path")"
     fi
 
-    LANDSCAPE_TEST_VARIANT="${LANDSCAPE_TEST_VARIANT:-$(landscape_guess_variant_from_image_path "$image_path")}"
+    landscape_load_test_identity "$image_path" || true
     LANDSCAPE_TEST_ARTIFACT_ID="${LANDSCAPE_TEST_ARTIFACT_ID:-${image_base:-unknown-image}}"
     LANDSCAPE_TEST_LANDSCAPE_VERSION="${LANDSCAPE_TEST_LANDSCAPE_VERSION:-unknown}"
     LANDSCAPE_TEST_GIT_SHA="${LANDSCAPE_TEST_GIT_SHA:-${GITHUB_SHA:-unknown}}"
@@ -472,7 +517,11 @@ landscape_write_test_metadata() {
 name=${LANDSCAPE_TEST_NAME}
 image_path=${image_path}
 image_basename=${image_base}
-variant=${LANDSCAPE_TEST_VARIANT}
+base_system=${LANDSCAPE_TEST_BASE_SYSTEM:-unknown}
+include_docker=${LANDSCAPE_TEST_INCLUDE_DOCKER:-unknown}
+output_formats=${LANDSCAPE_TEST_OUTPUT_FORMATS:-unknown}
+run_test=${LANDSCAPE_TEST_RUN_TEST:-unknown}
+release_channel=${LANDSCAPE_TEST_RELEASE_CHANNEL:-unknown}
 artifact_id=${LANDSCAPE_TEST_ARTIFACT_ID}
 landscape_version=${LANDSCAPE_TEST_LANDSCAPE_VERSION}
 git_sha=${LANDSCAPE_TEST_GIT_SHA}
@@ -737,6 +786,40 @@ landscape_router_dump_diagnostics() {
     fi
 }
 
+
+wait_for_landscape_interfaces_ready() {
+    local token="$1"
+    local ready_timeout="${2:-${LANDSCAPE_ROUTER_READY_TIMEOUT}}"
+    local start_ts now_ts payload names
+
+    start_ts=$(date +%s)
+    while :; do
+        payload=$(landscape_api_interfaces "$token" 2>/dev/null || true)
+        if printf '%s' "$payload" | jq -e . >/dev/null 2>&1; then
+            names=$(printf '%s' "$payload" | jq -r '
+                [
+                  (.data.managed[]?.config.name // empty),
+                  (.data.managed[]?.status.iface_name // empty),
+                  (.data.unmanaged[]?.config.name // empty),
+                  (.data.unmanaged[]?.status.iface_name // empty)
+                ]
+                | map(select(length > 0))
+                | unique
+                | .[]
+            ' 2>/dev/null || true)
+            if contains_all_text "$names" "$LANDSCAPE_EXPECTED_WAN_IFACE" "$LANDSCAPE_EXPECTED_LAN_IFACE"; then
+                return 0
+            fi
+        fi
+
+        now_ts=$(date +%s)
+        if (( now_ts - start_ts >= ready_timeout )); then
+            return 1
+        fi
+        sleep "$LANDSCAPE_API_READY_INTERVAL"
+    done
+}
+
 landscape_router_wait_ready() {
     local label="${1:-Router}"
     local ssh_timeout="${2:-${SSH_TIMEOUT:-120}}"
@@ -748,7 +831,6 @@ landscape_router_wait_ready() {
     local interfaces_state="pending"
     local -a service_states=()
     local token=""
-    local ifaces=""
     local service_key iface binding failure_reason=""
 
     LANDSCAPE_ROUTER_API_TOKEN=""
@@ -790,8 +872,7 @@ landscape_router_wait_ready() {
     fi
     api_layout_state="ready"
 
-    ifaces=$(landscape_api_interfaces "$token" 2>/dev/null || true)
-    if ! contains_all_text "$ifaces" "$LANDSCAPE_EXPECTED_WAN_IFACE" "$LANDSCAPE_EXPECTED_LAN_IFACE"; then
+    if ! wait_for_landscape_interfaces_ready "$token" "$ready_timeout"; then
         interfaces_state="failed"
         failure_reason="expected interfaces missing from api"
         landscape_router_write_readiness_snapshot failed "$failure_reason" "$ssh_state" "$api_listener_state" "$api_login_state" "$api_layout_state" "$interfaces_state"

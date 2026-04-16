@@ -6,3 +6,5 @@ output/
 *.xz
 downloads/
 .claude/
+build.env.local
+build.env.*

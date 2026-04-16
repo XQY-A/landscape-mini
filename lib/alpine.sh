@@ -44,14 +44,14 @@ backend_bootstrap() {
     if [[ ! -x "${APK_STATIC}" ]]; then
         echo "  Downloading apk-tools-static ..."
         mkdir -p "${APK_TOOLS_DIR}"
-        local APK_TOOLS_URL="${ALPINE_MIRROR}/${ALPINE_RELEASE}/main/x86_64"
+        local APK_TOOLS_URL="${RESOLVED_ALPINE_MIRROR}/${ALPINE_RELEASE}/main/x86_64"
         local APK_TOOLS_PKG
-        APK_TOOLS_PKG=$(curl -sL "${APK_TOOLS_URL}/" | grep -oP 'apk-tools-static-[0-9][^"]*\.apk' | head -1)
+        APK_TOOLS_PKG=$(curl -fsSL --retry 3 --retry-delay 2 "${APK_TOOLS_URL}/" | grep -oP 'apk-tools-static-[0-9][^"]*\.apk' | head -1)
         if [[ -z "${APK_TOOLS_PKG}" ]]; then
             echo "ERROR: Could not find apk-tools-static package at ${APK_TOOLS_URL}/"
             exit 1
         fi
-        curl -L -o "${APK_TOOLS_DIR}/apk-tools-static.apk" "${APK_TOOLS_URL}/${APK_TOOLS_PKG}"
+        retry_command 3 5 curl -fL --retry 3 --retry-delay 2 -o "${APK_TOOLS_DIR}/apk-tools-static.apk" "${APK_TOOLS_URL}/${APK_TOOLS_PKG}"
         tar -xzf "${APK_TOOLS_DIR}/apk-tools-static.apk" -C "${APK_TOOLS_DIR}" sbin/apk.static 2>/dev/null || \
             tar -xf "${APK_TOOLS_DIR}/apk-tools-static.apk" -C "${APK_TOOLS_DIR}" sbin/apk.static
         chmod +x "${APK_STATIC}"
@@ -62,10 +62,10 @@ backend_bootstrap() {
     # Bootstrap Alpine minimal root
     echo "  Running apk.static --initdb add alpine-base ..."
     mkdir -p "${ROOTFS_DIR}/etc/apk"
-    echo "${ALPINE_MIRROR}/${ALPINE_RELEASE}/main" > "${ROOTFS_DIR}/etc/apk/repositories"
-    echo "${ALPINE_MIRROR}/${ALPINE_RELEASE}/community" >> "${ROOTFS_DIR}/etc/apk/repositories"
+    echo "${RESOLVED_ALPINE_MIRROR}/${ALPINE_RELEASE}/main" > "${ROOTFS_DIR}/etc/apk/repositories"
+    echo "${RESOLVED_ALPINE_MIRROR}/${ALPINE_RELEASE}/community" >> "${ROOTFS_DIR}/etc/apk/repositories"
 
-    "${APK_STATIC}" \
+    retry_command 3 5 "${APK_STATIC}" \
         --root "${ROOTFS_DIR}" \
         --initdb \
         --update-cache \
@@ -86,16 +86,14 @@ backend_configure() {
     # Mount bind filesystems for chroot
     mount_chroot_fs
 
-    # ---- DNS resolver (needed for apk to fetch packages) ----
-    echo "  Copying host resolv.conf for package installation ..."
-    cp /etc/resolv.conf "${ROOTFS_DIR}/etc/resolv.conf" 2>/dev/null || \
-        echo "nameserver 8.8.8.8" > "${ROOTFS_DIR}/etc/resolv.conf"
+    # ---- Build-time DNS resolver (needed for apk to fetch packages) ----
+    configure_build_resolver
 
     # ---- APK repositories ----
     echo "  Writing /etc/apk/repositories ..."
     cat > "${ROOTFS_DIR}/etc/apk/repositories" <<EOF
-${ALPINE_MIRROR}/${ALPINE_RELEASE}/main
-${ALPINE_MIRROR}/${ALPINE_RELEASE}/community
+${RESOLVED_ALPINE_MIRROR}/${ALPINE_RELEASE}/main
+${RESOLVED_ALPINE_MIRROR}/${ALPINE_RELEASE}/community
 EOF
 
     # ---- Hostname ----
@@ -122,7 +120,7 @@ EOF
 
     # ---- Install packages ----
     echo "  Installing packages (this may take a while) ..."
-    run_in_chroot "
+    run_in_chroot_retry 3 5 "
         apk update
         apk add --no-cache \
             linux-lts linux-firmware-none \
@@ -176,10 +174,10 @@ EOF
 GRUB_DEFAULT=0
 GRUB_TIMEOUT=3
 GRUB_DISTRIBUTOR="Landscape"
-GRUB_CMDLINE_LINUX_DEFAULT="console=ttyS0,115200n8 console=tty0"
+GRUB_CMDLINE_LINUX_DEFAULT="console=ttyS0,115200n8"
 GRUB_CMDLINE_LINUX="rootfstype=ext4 modules=ext4,sd_mod,vmw_pvscsi,mptspi,mptbase,mptscsih net.ifnames=0 biosdevname=0 nomodeset"
 GRUB_TERMINAL_INPUT="console serial"
-GRUB_TERMINAL_OUTPUT="console serial"
+GRUB_TERMINAL_OUTPUT="serial"
 GRUB_SERIAL_COMMAND="serial --speed=115200 --unit=0 --word=8 --parity=no --stop=1"
 EOF
 
@@ -198,7 +196,7 @@ EOF
 
     # ---- Timezone ----
     echo "  Setting timezone to ${TIMEZONE} ..."
-    run_in_chroot "
+    run_in_chroot_retry 3 5 "
         apk add tzdata 2>/dev/null || true
         cp /usr/share/zoneinfo/${TIMEZONE} /etc/localtime 2>/dev/null || true
         echo '${TIMEZONE}' > /etc/timezone
@@ -275,10 +273,8 @@ auto eth0
 iface eth0 inet dhcp
 EOF
 
-    # ---- DNS resolver ----
-    echo "  Writing /etc/resolv.conf ..."
-    rm -f "${ROOTFS_DIR}/etc/resolv.conf"
-    echo "nameserver 114.114.114.114" > "${ROOTFS_DIR}/etc/resolv.conf"
+    # ---- Image default DNS resolver ----
+    configure_image_resolver
 
     # ---- Enable serial console (for QEMU testing) ----
     echo "  Enabling serial console ..."
@@ -332,7 +328,7 @@ backend_install_landscape_services() {
 # Phase 6: Optional Docker Installation (Alpine)
 # =============================================================================
 backend_install_docker() {
-    if [[ "${INCLUDE_DOCKER}" != "yes" ]]; then
+    if [[ "${INCLUDE_DOCKER}" != "true" ]]; then
         echo ""
         echo "==== Phase 6: Docker Installation (skipped) ===="
         return 0
@@ -340,8 +336,12 @@ backend_install_docker() {
 
     echo ""
     echo "==== Phase 6: Installing Docker (Alpine) ===="
+    echo "  Docker packages follow ALPINE_MIRROR=${RESOLVED_ALPINE_MIRROR}"
 
-    run_in_chroot "
+    # ---- Build-time DNS resolver ----
+    configure_build_resolver
+
+    run_in_chroot_retry 3 5 "
         apk add docker docker-cli-compose docker-cli-buildx
     "
 
@@ -358,6 +358,9 @@ EOF
     # Enable Docker service
     echo "  Enabling Docker service ..."
     run_in_chroot "rc-update add docker default"
+
+    # ---- Image default DNS resolver ----
+    configure_image_resolver
 
     echo "  Phase 6 complete."
 }

@@ -4,22 +4,17 @@
 
 If your goal is to **quickly create your own image**, the easiest and most recommended option is **Custom Build** in GitHub Actions.
 
-You can think of it like this:
+It now uses an explicit tuple model:
 
-> No local build environment needed. Just fill in a few options in the GitHub web UI and let GitHub build the image for you.
+- `base_system`
+- `include_docker`
+- `output_formats`
 
-In most cases:
-
-- A build-only run usually takes about **5 minutes**
-- A build that also includes tests usually takes about **10 minutes**
-
-If you just want to **try Landscape as quickly as possible** and do not need to change any settings yet, it is usually faster to download one of the prebuilt images from the repository’s **Releases** page.
+So instead of choosing a legacy variant name, you directly describe the image you want.
 
 ---
 
 ## Quick start in 3 minutes
-
-If this is your first time using it, just follow the steps below.
 
 ### Step 1: Open Actions
 
@@ -31,105 +26,71 @@ In your own fork of the repository:
 
 ---
 
-### Step 2: Choose a variant
+### Step 2: Choose the base tuple
 
-If you are not sure which one to pick, start with:
+For a first run, start with:
 
-- `default`
+- `base_system=debian`
+- `include_docker=false`
+- `output_formats=img`
 
-Here is a simple way to think about the common options:
+A simple way to think about the common combinations:
 
-- `default`: the most general-purpose option, recommended for first-time users
-- `docker`: includes Docker in the image
-- `alpine`: a lighter image
-- `alpine-docker`: lighter image with Docker included
+- `debian + false`: most general-purpose, recommended for first-time users
+- `debian + true`: Debian image with Docker included
+- `alpine + false`: lighter image
+- `alpine + true`: lighter image with Docker included
 
-If you just want to get your first successful build, **choose `default`**.
+And for output formats:
+
+- `img`: the core format used for testing and raw-disk import
+- `vmdk`: useful when you specifically need VMDK
+- `pve-ova`: useful for PVE import
+
+If you just want your first successful build, use **`debian + false + img`**.
 
 ---
 
 ### Step 3: Fill in parameters as needed
 
-Most users fall into one of these two scenarios.
-
 #### Scenario A: You only want to change network settings
 
-If you only want to customize LAN / DHCP settings, you can enter:
+You can enter:
 
 - `lan_server_ip=192.168.50.1`
 - `lan_range_start=192.168.50.100`
 - `lan_range_end=192.168.50.200`
 - `lan_netmask=24`
 
-What these parameters mean:
-
-- `lan_server_ip`
-  - The router’s IP address on the LAN
-  - This is usually also used as the gateway and DHCP server address
-  - A common value is `192.168.50.1`
-
-- `lan_range_start`
-  - The first IP address that DHCP can assign automatically
-  - A common value is `192.168.50.100`
-
-- `lan_range_end`
-  - The last IP address that DHCP can assign automatically
-  - A common value is `192.168.50.200`
-
-- `lan_netmask`
-  - The subnet prefix length
-  - In most cases, `24` is the right choice
-
-A few things to keep in mind:
-
-- `lan_server_ip` should not overlap with the DHCP address pool
-- `lan_range_start` and `lan_range_end` should be in the same subnet
-- If you are not familiar with subnetting, using `24` is usually enough
-
-You can leave the other fields blank or keep their default values.
-
 #### Scenario B: You also want to change passwords
 
-If you also want to change the login password and Web admin credentials, you can additionally enter:
+You can additionally enter:
 
 - `root_password=Passw0rd!234`
 - `api_username=admin`
 - `api_password=Adm1n!234`
 
-These parameters are:
+#### Scenario C: You also want to select tests
 
-- `root_password`
-  - The Linux system login password
-  - This affects:
-    - `root`
-    - `ld`
+You can use `run_test` to choose what runs after the image build:
 
-- `api_username`
-  - The username for the Web admin interface
+- empty / `none`: build only
+- `readiness`
+- `readiness,dataplane`
 
-- `api_password`
-  - The password for the Web admin interface
+Note:
 
-If this is just for personal use or temporary testing, entering these values directly is fine.
-
-If you care more about security, it is better to store them in **GitHub Secrets** instead of typing them directly into the workflow form.
+- when `include_docker=true`, requested dataplane is skipped explicitly with a reason in the logs
 
 #### Other common input
 
 - `landscape_version`
   - The Landscape version to build
   - If left blank, the repository default is used
-  - If you are not sure, leaving it blank is usually the best choice
 
-The current priority order is:
+Current precedence:
 
 **direct inputs > secrets > defaults**
-
-That means:
-
-- If you enter a value manually in the workflow form, that value is used first
-- If you leave it blank, the workflow will try to read from GitHub Secrets
-- If no secret is set either, it falls back to the default value
 
 ---
 
@@ -139,74 +100,68 @@ After filling in the options, click:
 
 - **Run workflow**
 
-Then wait for GitHub Actions to start the job.
+---
+
+### Step 5: Use the latest successful build links
+
+After the workflow finishes, you can still download the Artifacts.
+
+But the recommended path now is the fixed release entry:
+
+- Release page: `https://github.com/<owner>/landscape-mini/releases/tag/custom-build-latest`
+- Direct download base: `https://github.com/<owner>/landscape-mini/releases/download/custom-build-latest/<asset>`
+
+That fixed release always points to the latest successful Custom Build, regardless of tuple:
+
+- old assets are removed first
+- new assets from the latest successful build are uploaded afterward
+- `build-metadata.txt` and `effective-landscape_init.toml` are updated alongside them
+
+So if you run Debian first and Alpine later, the later Alpine run replaces the earlier Debian assets at the same tag.
+
+The output usually includes:
+
+- the raw image `.img` or a stable renamed asset
+- build metadata `build-metadata.txt`
+- the resolved configuration `effective-landscape_init.toml`
+- and, if requested, `.vmdk` / `.ova`
+
+If you need immutable per-build outputs, use the Artifacts from that workflow run or record its `run_id` / `artifact_id`.
 
 ---
 
-### Step 5: Download the build output
+## How to choose a tuple
 
-After the workflow finishes:
+### What should I pick for my first run?
 
-- Open that workflow run
-- Scroll down to **Artifacts**
-- Download the artifact you need
+Use:
 
-The build output usually includes:
+- `base_system=debian`
+- `include_docker=false`
+- `output_formats=img`
 
-- The image file `.img`
-- Build metadata `build-metadata.txt`
-- The resolved configuration `effective-landscape_init.toml`
+### I want Docker
 
-If you only want the image itself, the `.img` file is the main thing to look for.
+Set:
 
----
+- `include_docker=true`
 
-## Tips
+### I want a lighter image
 
-- If you only want to confirm that the image builds successfully, you do not always need to wait for every test to finish.
-- As soon as the image artifact has been uploaded for that run, you can download it and try it.
-- If you just want a quick first experience and do not need to change settings, downloading a prebuilt image from the **Releases** page is usually the easiest option.
-- For first-time use, the safest choice is still `variant=default`, and only change the parameters you actually care about.
-- If you plan to use the image long term, or you care about security, store passwords in GitHub Secrets.
+Set:
 
----
+- `base_system=alpine`
 
-## When to use Custom Build, and when not to
+### I want to import into PVE
 
-### Custom Build is recommended when
+Set:
 
-Custom Build is the better choice if:
+- `output_formats=img,pve-ova`
 
-- You forked this repository and want to generate your own image
-- You do not want to set up a local Linux build environment
-- You want to complete the build entirely from the GitHub web interface
-- You only need to change common settings, not modify code
+That gives you both:
 
-### Local builds are better when
-
-A local build is a better fit if:
-
-- You are modifying `build.sh`, files under `lib/`, files under `rootfs/`, or test scripts
-- You are developing the workflow itself
-- You need to debug frequently
-- You need to validate local code that has not been pushed to GitHub yet
-
-In short:
-
-- **Want to generate an image?** Use Custom Build first.
-- **Want to develop the build system itself?** Build locally.
-
----
-
-## What is the best way to handle passwords?
-
-Here is the simplest rule of thumb.
-
-### If this is only for temporary personal use
-You can enter them directly in the workflow form.
-
-### If you plan to use it long term, or you care more about security
-Use GitHub Secrets instead.
+- a raw `.img` for testing and fallback
+- an `.ova` for import workflows
 
 ---
 
@@ -216,45 +171,47 @@ After you have successfully run Custom Build once, you can also use:
 
 - **Test Image**
 
-This is useful for tasks like:
+This is useful for:
 
-- Re-running validation on an existing artifact
-- Running readiness or dataplane checks afterward
-- Testing again with different SSH or API credentials
+- re-running validation on an existing artifact
+- running readiness or dataplane checks afterward
+- testing again with different SSH or API credentials
 
-A simple way to think about it is:
+The retest entry points are now:
 
-> Custom Build creates the image. Test Image checks the image again.
+- `run_id`
+- `artifact_id`
+
+In other words, retests target a concrete build artifact directly rather than depending on older suffix naming conventions.
 
 ---
 
 ## FAQ
 
-### Which variant should I choose for my first run?
+### What should I choose for my first run?
 
 Choose:
 
-- `default`
+- `base_system=debian`
+- `include_docker=false`
+- `output_formats=img`
 
-### I do not understand `landscape_version`. Do I need to set it?
+### Does `pve-ova` replace `.img`?
 
-Usually not. Leaving it blank is fine.
+No.
 
-### I only want to change the LAN subnet. Can I leave everything else alone?
+It is recommended to keep `img` and add `pve-ova` when needed.
 
-Yes. Just fill in the network-related parameters and leave the rest unchanged.
+### Why does dataplane sometimes not run?
 
-### Do I have to use GitHub Secrets?
+The rule is:
 
-Not necessarily.
+- `run_test=` or `run_test=none` → no tests
+- `run_test=readiness` → readiness only
+- `run_test=readiness,dataplane` with `include_docker=false` → readiness + dataplane
+- `run_test=readiness,dataplane` with `include_docker=true` → dataplane is skipped explicitly
 
-If this is your personal fork, a temporary test, or convenience matters more, entering values directly in the workflow form is acceptable.
-
-If security matters more to you, use Secrets instead.
-
-### Where do I download the image after the workflow finishes?
-
-Open that workflow run and download it from **Artifacts**.
+That is based on the unified test contract and capability rules, not on legacy variant names.
 
 ---
 
@@ -264,6 +221,8 @@ If your goal is:
 
 > **“I want to create my own image as quickly as possible.”**
 
-Start with **Custom Build**, not a local build.
+Start with:
 
-Get your first image working first, then decide whether you want more advanced customization later.
+- `debian + no-docker + img`
+
+Get your first image working first, then decide whether to add Docker, switch to Alpine, or request `vmdk` / `pve-ova`.

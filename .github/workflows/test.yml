@@ -6,8 +6,8 @@ on:
       run_id:
         description: "构建 workflow run ID（留空时自动使用 main 上最新成功 CI）\nBuild workflow run ID (leave empty for latest successful CI run on main)"
         default: ""
-      artifact_suffix:
-        description: "Artifact 后缀：<variant>-<version>-<sha12>-<runid>（留空时自动解析最新）\nArtifact suffix: <variant>-<version>-<sha12>-<runid> (leave empty to auto-resolve latest)"
+      artifact_id:
+        description: "Artifact 标识：<base_system>-docker-<include_docker>-<version>-<sha12>-<runid>（留空时自动解析最新）\nArtifact id: <base_system>-docker-<include_docker>-<version>-<sha12>-<runid> (leave empty to auto-resolve latest)"
         default: ""
       landscape_version:
         description: "用于校验 metadata 的 Landscape 版本（可选）\nExpected Landscape version for metadata (optional)"
@@ -25,15 +25,15 @@ on:
 jobs:
   test:
     runs-on: ubuntu-24.04
-    timeout-minutes: 55
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         include:
-          - variant: default
-          - variant: docker
-          - variant: alpine
-          - variant: alpine-docker
+          - base_system: debian
+            include_docker: 'false'
+          - base_system: debian
+            include_docker: 'true'
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -114,18 +114,21 @@ jobs:
             install -y sshpass socat curl jq qemu-system-x86 ovmf unzip
 
       - name: Resolve artifact names
+        if: ${{ github.event.inputs.artifact_id == '' || startsWith(github.event.inputs.artifact_id, format('{0}-docker-{1}-', matrix.base_system, matrix.include_docker)) }}
         id: meta
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
         run: |
           set -euo pipefail
-          suffix="${{ github.event.inputs.artifact_suffix }}"
+          requested_artifact_id="${{ github.event.inputs.artifact_id }}"
           run_id="${{ github.event.inputs.run_id }}"
-          if [ -n "$suffix" ]; then
-            artifact_id="$suffix"
+          tuple_prefix="${{ matrix.base_system }}-docker-${{ matrix.include_docker }}-"
+
+          if [ -n "$requested_artifact_id" ]; then
+            artifact_id="$requested_artifact_id"
             if [ -z "$run_id" ]; then
-              run_id="${suffix##*-}"
+              run_id="${artifact_id##*-}"
             fi
           else
             if [ -z "$run_id" ]; then
@@ -139,9 +142,9 @@ jobs:
             fi
             artifact_name="$(gh api \
               repos/${{ github.repository }}/actions/runs/${run_id}/artifacts \
-              --jq '.artifacts[] | select(.name | startswith("landscape-mini-x86-${{ matrix.variant }}-")) | .name' | head -n 1)"
+              --jq ".artifacts[] | select(.name | startswith(\"landscape-mini-x86-${tuple_prefix}\")) | .name" | head -n 1)"
             if [ -z "$artifact_name" ]; then
-              echo "Unable to resolve artifact for variant ${{ matrix.variant }} from run ${run_id}" >&2
+              echo "Unable to resolve artifact for tuple ${tuple_prefix} from run ${run_id}" >&2
               exit 1
             fi
             artifact_id="${artifact_name#landscape-mini-x86-}"
@@ -154,6 +157,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Download image artifact
+        if: ${{ steps.meta.conclusion == 'success' }}
         uses: actions/download-artifact@v4
         with:
           name: ${{ steps.meta.outputs.image_artifact }}
@@ -162,6 +166,7 @@ jobs:
           run-id: ${{ steps.meta.outputs.resolved_run_id }}
 
       - name: Restore build metadata into test logs
+        if: ${{ steps.meta.conclusion == 'success' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -184,11 +189,15 @@ jobs:
           fi
 
       - name: List outputs
+        if: ${{ steps.meta.conclusion == 'success' }}
         run: ls -lh output/
 
-      - name: Run readiness checks (${{ matrix.variant }})
+      - name: Run readiness checks (${{ matrix.base_system }}, docker=${{ matrix.include_docker }})
+        if: ${{ steps.meta.conclusion == 'success' }}
         env:
-          LANDSCAPE_TEST_VARIANT: ${{ matrix.variant }}
+          LANDSCAPE_TEST_BASE_SYSTEM: ${{ matrix.base_system }}
+          LANDSCAPE_TEST_INCLUDE_DOCKER: ${{ matrix.include_docker }}
+          LANDSCAPE_TEST_RUN_TEST: ${{ matrix.include_docker == 'false' && 'readiness,dataplane' || 'readiness' }}
           LANDSCAPE_TEST_ARTIFACT_ID: ${{ steps.meta.outputs.artifact_id }}
           LANDSCAPE_TEST_LANDSCAPE_VERSION: ${{ env.test_landscape_version }}
           LANDSCAPE_EFFECTIVE_INIT_CONFIG: output/metadata/effective-landscape_init.toml
@@ -197,9 +206,12 @@ jobs:
           API_PASSWORD: ${{ steps.creds.outputs.api_password }}
         run: timeout --foreground 20m ./tests/test-readiness.sh output/*.img
 
-      - name: Run dataplane tests (${{ matrix.variant }})
+      - name: Run dataplane tests (${{ matrix.base_system }}, docker=${{ matrix.include_docker }})
+        if: ${{ steps.meta.conclusion == 'success' && matrix.include_docker == 'false' }}
         env:
-          LANDSCAPE_TEST_VARIANT: ${{ matrix.variant }}
+          LANDSCAPE_TEST_BASE_SYSTEM: ${{ matrix.base_system }}
+          LANDSCAPE_TEST_INCLUDE_DOCKER: ${{ matrix.include_docker }}
+          LANDSCAPE_TEST_RUN_TEST: readiness,dataplane
           LANDSCAPE_TEST_ARTIFACT_ID: ${{ steps.meta.outputs.artifact_id }}
           LANDSCAPE_TEST_LANDSCAPE_VERSION: ${{ env.test_landscape_version }}
           LANDSCAPE_EFFECTIVE_INIT_CONFIG: output/metadata/effective-landscape_init.toml
@@ -209,7 +221,7 @@ jobs:
         run: timeout --foreground 25m ./tests/test-dataplane.sh output/*.img
 
       - name: Upload test logs
-        if: always()
+        if: ${{ always() && steps.meta.conclusion == 'success' }}
         uses: actions/upload-artifact@v4
         with:
           name: test-logs-retest-${{ steps.meta.outputs.artifact_id }}

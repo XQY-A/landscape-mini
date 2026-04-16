@@ -3,16 +3,25 @@ name: Custom Build
 on:
   workflow_dispatch:
     inputs:
-      variant:
-        description: "构建变体\nBuild variant"
+      base_system:
+        description: "基础系统\nBase system"
         required: true
-        default: default
+        default: debian
         type: choice
         options:
-          - default
-          - docker
+          - debian
           - alpine
-          - alpine-docker
+      include_docker:
+        description: "是否包含 Docker\nInclude Docker"
+        required: true
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+      output_formats:
+        description: "输出格式（逗号分隔，按顺序）\nOutput formats (comma-separated, ordered)"
+        default: "img"
       landscape_version:
         description: "Landscape 版本（留空时使用 build.env 默认值）\nLandscape version (empty uses build.env default)"
         default: ""
@@ -37,49 +46,24 @@ on:
       api_password:
         description: "Web 管理密码（如特别注重安全，请改用 GitHub Secrets）\nWeb admin password (if security matters, prefer GitHub Secrets)"
         default: ""
+      run_test:
+        description: "测试选择：留空/none、readiness、readiness,dataplane\nTest selection: empty/none, readiness, readiness,dataplane"
+        default: ""
+        type: string
 
 jobs:
   prepare:
     runs-on: ubuntu-24.04
     outputs:
-      build_flags: ${{ steps.flags.outputs.build_flags }}
-      run_e2e: ${{ steps.flags.outputs.run_e2e }}
       config_profile: ${{ steps.meta.outputs.config_profile }}
       topology_source: ${{ steps.meta.outputs.topology_source }}
       root_password: ${{ steps.creds.outputs.root_password }}
       root_password_source: ${{ steps.creds.outputs.root_password_source }}
       api_username: ${{ steps.creds.outputs.api_username }}
+      api_username_source: ${{ steps.creds.outputs.api_username_source }}
       api_password: ${{ steps.creds.outputs.api_password }}
-      api_credentials_source: ${{ steps.creds.outputs.api_credentials_source }}
+      api_password_source: ${{ steps.creds.outputs.api_password_source }}
     steps:
-      - name: Resolve variant flags
-        id: flags
-        shell: bash
-        run: |
-          set -euo pipefail
-          case "${{ github.event.inputs.variant }}" in
-            default)
-              echo "build_flags=" >> "$GITHUB_OUTPUT"
-              echo "run_e2e=true" >> "$GITHUB_OUTPUT"
-              ;;
-            docker)
-              echo "build_flags=--with-docker" >> "$GITHUB_OUTPUT"
-              echo "run_e2e=false" >> "$GITHUB_OUTPUT"
-              ;;
-            alpine)
-              echo "build_flags=--base alpine" >> "$GITHUB_OUTPUT"
-              echo "run_e2e=true" >> "$GITHUB_OUTPUT"
-              ;;
-            alpine-docker)
-              echo "build_flags=--base alpine --with-docker" >> "$GITHUB_OUTPUT"
-              echo "run_e2e=false" >> "$GITHUB_OUTPUT"
-              ;;
-            *)
-              echo "Unknown variant: ${{ github.event.inputs.variant }}" >&2
-              exit 1
-              ;;
-          esac
-
       - name: Resolve config metadata
         id: meta
         shell: bash
@@ -158,25 +142,33 @@ jobs:
         run: |
           cat <<'EOF' >> "$GITHUB_STEP_SUMMARY"
           ## 凭据说明
+          - 构建身份现在由 `base_system + include_docker + output_formats` 显式定义。
           - 为了方便，支持直接通过 workflow inputs 传入凭据。
           - 如果你特别注重安全，建议优先使用仓库 Secrets：`CUSTOM_ROOT_PASSWORD`、`CUSTOM_API_USERNAME`、`CUSTOM_API_PASSWORD`。
           - 构建 metadata 只记录凭据来源，不记录 secret 值。
           - 当前优先级：direct inputs > secrets > defaults。
+          - 测试选择使用 `run_test`：空 / `none`、`readiness`、`readiness,dataplane`。
 
           ## Credential guidance
+          - Build identity is now defined explicitly by `base_system + include_docker + output_formats`.
           - Direct workflow inputs are supported for convenience.
           - If security matters, prefer repository secrets: `CUSTOM_ROOT_PASSWORD`, `CUSTOM_API_USERNAME`, `CUSTOM_API_PASSWORD`.
           - Build metadata records only credential sources, never secret values.
           - Current precedence: direct inputs > secrets > defaults.
+          - Test selection uses `run_test`: empty / `none`, `readiness`, or `readiness,dataplane`.
           EOF
 
   build:
     needs: prepare
+    permissions:
+      actions: read
+      contents: read
     uses: ./.github/workflows/_build-and-validate.yml
     with:
-      variant: ${{ github.event.inputs.variant }}
-      build_flags: ${{ needs.prepare.outputs.build_flags }}
-      run_e2e: ${{ needs.prepare.outputs.run_e2e == 'true' }}
+      base_system: ${{ github.event.inputs.base_system }}
+      include_docker: ${{ github.event.inputs.include_docker }}
+      output_formats: ${{ github.event.inputs.output_formats }}
+      run_test: ${{ github.event.inputs.run_test }}
       landscape_version: ${{ github.event.inputs.landscape_version }}
       config_profile: ${{ needs.prepare.outputs.config_profile }}
       topology_source: ${{ needs.prepare.outputs.topology_source }}
@@ -190,3 +182,105 @@ jobs:
       api_username_source: ${{ needs.prepare.outputs.api_username_source }}
       api_password: ${{ needs.prepare.outputs.api_password }}
       api_password_source: ${{ needs.prepare.outputs.api_password_source }}
+      release_channel: custom-build-fixed
+      release_tag: custom-build-latest
+      repository_owner: ${{ github.repository_owner }}
+
+  publish-fixed-release:
+    needs: build
+    runs-on: ubuntu-24.04
+    if: ${{ github.event_name == 'workflow_dispatch' && needs.build.result == 'success' }}
+    permissions:
+      actions: read
+      contents: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      RELEASE_TAG: custom-build-latest
+    steps:
+      - name: Download image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build.outputs.image_artifact }}
+          path: dist/
+
+      - name: Prepare fixed-release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          metadata="dist/metadata/build-metadata.txt"
+          if [ ! -f "$metadata" ]; then
+            echo "Missing build metadata in downloaded artifact" >&2
+            exit 1
+          fi
+
+          source "$metadata"
+          base_name="landscape-mini-x86-${base_system}"
+          if [ "$include_docker" = "true" ]; then
+            base_name="${base_name}-docker"
+          fi
+
+          mkdir -p release-assets
+          IFS=',' read -r -a files <<< "$produced_files"
+          for produced in "${files[@]}"; do
+            produced="${produced//[[:space:]]/}"
+            [ -n "$produced" ] || continue
+            src="dist/${produced}"
+            if [ ! -f "$src" ]; then
+              echo "Produced file listed in metadata not found: $src" >&2
+              exit 1
+            fi
+
+            case "$produced" in
+              *.img.gz)
+                target="${base_name}.img.gz"
+                ;;
+              *.vmdk.gz)
+                target="${base_name}.vmdk.gz"
+                ;;
+              *.img)
+                target="${base_name}.img"
+                ;;
+              *.vmdk)
+                target="${base_name}.vmdk"
+                ;;
+              *.ova)
+                target="${base_name}.ova"
+                ;;
+              *)
+                echo "Unsupported produced file for fixed release: $produced" >&2
+                exit 1
+                ;;
+            esac
+
+            cp "$src" "release-assets/${target}"
+          done
+
+          cp "$metadata" release-assets/build-metadata.txt
+          if [ -f dist/metadata/effective-landscape_init.toml ]; then
+            cp dist/metadata/effective-landscape_init.toml release-assets/effective-landscape_init.toml
+          fi
+
+      - name: Recreate fixed release
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release delete "$RELEASE_TAG" --yes --cleanup-tag
+          fi
+
+          gh release create "$RELEASE_TAG" release-assets/* \
+            --target "$GITHUB_SHA" \
+            --title "Custom Build Latest" \
+            --notes "Latest successful custom build for this repository owner. Assets are replaced on each successful run." \
+            --prerelease
+
+      - name: Publish fixed-release summary
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "## Fixed custom-build release"
+            echo "- Tag: ${RELEASE_TAG}"
+            echo "- Release page: https://github.com/${{ github.repository }}/releases/tag/${RELEASE_TAG}"
+            echo "- Direct download base: https://github.com/${{ github.repository }}/releases/download/${RELEASE_TAG}/<asset>"
+          } >> "$GITHUB_STEP_SUMMARY"

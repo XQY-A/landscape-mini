@@ -25,7 +25,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 source "${SCRIPT_DIR}/common.sh"
 
-IMAGE_PATH="${1:-${PROJECT_DIR}/output/landscape-mini-x86.img}"
+IMAGE_PATH="${1:-${PROJECT_DIR}/output/landscape-mini-x86-debian.img}"
 SSH_PORT="${SSH_PORT:-2222}"
 WEB_PORT="${WEB_PORT:-9800}"
 LANDSCAPE_CONTROL_PORT="${LANDSCAPE_CONTROL_PORT:-6443}"
@@ -37,7 +37,7 @@ API_PASSWORD="${API_PASSWORD:-root}"
 SSH_TIMEOUT="${SSH_TIMEOUT:-120}"
 SHUTDOWN_TIMEOUT=15
 DHCP_TIMEOUT="${DHCP_TIMEOUT:-120}"
-LANDSCAPE_TEST_NAME="e2e"
+LANDSCAPE_TEST_NAME="dataplane"
 LANDSCAPE_IMAGE_PATH="${IMAGE_PATH}"
 
 CIRROS_VERSION="0.6.2"
@@ -109,14 +109,14 @@ preflight() {
     fi
 
     load_landscape_topology || exit 2
-    landscape_router_init_paths "e2e"
+    landscape_router_init_paths "dataplane"
 
-    CLIENT_SERIAL_LOG="${LANDSCAPE_TEST_LOG_DIR}/e2e-serial-client.log"
-    CLIENT_DIAGNOSTICS_FILE="${LANDSCAPE_TEST_LOG_DIR}/e2e-client-diagnostics.txt"
+    CLIENT_SERIAL_LOG="${LANDSCAPE_TEST_LOG_DIR}/dataplane-serial-client.log"
+    CLIENT_DIAGNOSTICS_FILE="${LANDSCAPE_TEST_LOG_DIR}/dataplane-client-diagnostics.txt"
     CLIENT_RESULTS_FILE="${LANDSCAPE_RESULTS_FILE}"
     rm -f "${CLIENT_SERIAL_LOG}" "${CLIENT_DIAGNOSTICS_FILE}"
 
-    LANDSCAPE_TEST_VARIANT="${LANDSCAPE_TEST_VARIANT:-$(landscape_guess_variant_from_image_path "${IMAGE_PATH}")}"
+    landscape_load_test_identity "${IMAGE_PATH}" || true
     LANDSCAPE_TEST_LANDSCAPE_VERSION="${LANDSCAPE_TEST_LANDSCAPE_VERSION:-$(resolve_default_landscape_version)}"
     landscape_write_test_metadata "${IMAGE_PATH}"
 
@@ -160,12 +160,12 @@ start_client() {
 
     info "Preparing client disk image..."
 
-    TEMP_CIRROS=$(mktemp "${LANDSCAPE_TEST_LOG_DIR}/e2e-client-XXXXXX.qcow2")
+    TEMP_CIRROS=$(mktemp "${LANDSCAPE_TEST_LOG_DIR}/dataplane-client-XXXXXX.qcow2")
     rm -f "${TEMP_CIRROS}"
     qemu-img create -f qcow2 -b "${cirros_file}" -F qcow2 "${TEMP_CIRROS}" >/dev/null
 
-    CLIENT_PIDFILE=$(mktemp "${LANDSCAPE_TEST_LOG_DIR}/e2e-client-pid-XXXXXX")
-    CLIENT_MONITOR=$(mktemp -u "${LANDSCAPE_TEST_LOG_DIR}/e2e-client-monitor-XXXXXX.sock")
+    CLIENT_PIDFILE=$(mktemp "${LANDSCAPE_TEST_LOG_DIR}/dataplane-client-pid-XXXXXX")
+    CLIENT_MONITOR=$(mktemp -u "${LANDSCAPE_TEST_LOG_DIR}/dataplane-client-monitor-XXXXXX.sock")
 
     local kvm_args=()
     read -r -a kvm_args <<< "$(detect_kvm)"

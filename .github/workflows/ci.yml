@@ -38,34 +38,19 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  default:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - base_system: debian
+            include_docker: 'false'
+            run_test: readiness,dataplane
     uses: ./.github/workflows/_build-and-validate.yml
     with:
-      variant: default
-      build_flags: ""
-      run_e2e: true
+      base_system: ${{ matrix.base_system }}
+      include_docker: ${{ matrix.include_docker }}
+      output_formats: img
+      run_test: ${{ matrix.run_test }}
       landscape_version: ${{ github.event.inputs.landscape_version || '' }}
-
-  docker:
-    uses: ./.github/workflows/_build-and-validate.yml
-    with:
-      variant: docker
-      build_flags: --with-docker
-      run_e2e: false
-      landscape_version: ${{ github.event.inputs.landscape_version || '' }}
-
-  alpine:
-    uses: ./.github/workflows/_build-and-validate.yml
-    with:
-      variant: alpine
-      build_flags: --base alpine
-      run_e2e: true
-      landscape_version: ${{ github.event.inputs.landscape_version || '' }}
-
-  alpine-docker:
-    uses: ./.github/workflows/_build-and-validate.yml
-    with:
-      variant: alpine-docker
-      build_flags: --base alpine --with-docker
-      run_e2e: false
-      landscape_version: ${{ github.event.inputs.landscape_version || '' }}
+      release_channel: public-ci
