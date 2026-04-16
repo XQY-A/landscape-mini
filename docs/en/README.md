@@ -30,7 +30,7 @@ If you are developing or debugging the build system itself, continue with the lo
 
 - Supports both Debian and Alpine as base systems
 - Build identity is explicit: `base_system + include_docker + output_formats`
-- Output formats include `img`, `vmdk`, and `pve-ova`
+- Output formats include `img`, `vmdk`, and `ova`
 - Supports both BIOS and UEFI for broad virtualization compatibility
 - Fork users can run customized builds directly on GitHub
 - GitHub Actions workflows are already set up for automated build, test, and release
@@ -71,8 +71,8 @@ LANDSCAPE_ADMIN_USER=admin RUN_TEST=readiness make build
 # Alpine raw image
 make build BASE_SYSTEM=alpine
 
-# Debian + Docker + img,pve-ova
-make build INCLUDE_DOCKER=true OUTPUT_FORMATS=img,pve-ova
+# Debian + Docker + img,ova
+make build INCLUDE_DOCKER=true OUTPUT_FORMATS=img,ova
 ```
 
 Common local customization inputs now include:
@@ -118,11 +118,13 @@ dd if=output/landscape-mini-x86-debian.img of=/dev/sdX bs=4M status=progress
 
 Two recommended paths:
 
-#### Option 1: Use `pve-ova`
+#### Option 1: Use `ova`
 
-- Include `pve-ova` in `OUTPUT_FORMATS`
-- Upload the generated `.ova`
+- Include `ova` in `OUTPUT_FORMATS`
+- Download the generated `.ova`
+- The current OVA defaults are PVE-oriented: 2 vCPUs, 2G RAM, and a virtio NIC
 - Import it in PVE, then verify boot mode, disk controller, and bridge assignment
+- If you want CPU type `host`, set it manually after import; PVE does not reliably inherit that from OVF metadata today
 
 #### Option 2: Use the raw `.img`
 
@@ -166,7 +168,7 @@ Avoid treating tracked `build.env` as the primary place for day-to-day customiza
 |------|--------|------|
 | `BASE_SYSTEM` | `debian` | Base system: `debian` / `alpine` |
 | `INCLUDE_DOCKER` | `false` | Include Docker: `true` / `false` |
-| `OUTPUT_FORMATS` | `img` | Ordered output formats: `img`, `vmdk`, `pve-ova` (comma-separated) |
+| `OUTPUT_FORMATS` | `img` | Ordered output formats: `img`, `vmdk`, `ova` (comma-separated) |
 | `RUN_TEST` | _(empty)_ | Local test selection: empty / `none`, `readiness`, `readiness,dataplane` |
 | `LANDSCAPE_ADMIN_USER` | `root` | Web admin username |
 | `LANDSCAPE_ADMIN_PASS` | `root` | Web admin password |
@@ -191,7 +193,7 @@ The repository provides `custom-build.yml` as a tuple-based build entry point fo
 
 - `base_system`: `debian` / `alpine`
 - `include_docker`: `true` / `false`
-- `output_formats`
+- `output_formats` (use `ova` as the canonical OVA output format name)
 - `landscape_version`
 - `lan_server_ip` / `lan_range_start` / `lan_range_end` / `lan_netmask`
 - `root_password`
@@ -199,6 +201,8 @@ The repository provides `custom-build.yml` as a tuple-based build entry point fo
 - `run_test`
 
 Current precedence: **direct inputs > secrets > defaults**.
+
+The workflow now validates inputs first, so invalid `output_formats` / `run_test` values and basic network input mistakes fail before the build starts.
 
 The shared test contract is now:
 
@@ -255,11 +259,12 @@ Coverage includes DHCP lease assignment, lease visibility in the Router API, and
 
 ## CI/CD
 
-- **CI**: Manual runs are always available. On pushes to `main` and pull requests, workflows run automatically only when build-related files, relevant files under `.github/`, or `CHANGELOG.md` change.
+- **CI**: Manual runs are always available. Automatic `push main` / `PR -> main` runs now trigger only for shell or CI execution logic changes.
+- **Fork protection**: automatic events in forks are skipped by default instead of actually running CI; manual dispatch remains available.
 - **Automatic CI validation surface**: only `debian + include_docker=false`, requesting raw `img` only.
 - **Readiness / dataplane coverage**: automatic CI runs `readiness,dataplane` for `include_docker=false`.
 - **Artifact contract**: every image artifact includes raw `.img`, `build-metadata.txt`, and `effective-landscape_init.toml`; automatic CI no longer exports `.vmdk` / `.ova`.
-- **Custom Build**: `custom-build.yml` lets fork users build explicit tuples with custom LAN/DHCP settings, Linux password, Web UI credentials, and `run_test` selection.
+- **Custom Build**: `custom-build.yml` lets fork users build explicit tuples, validates inputs early, and gives clearer download/import guidance after success.
 - **Manual Retest**: `test.yml` retests the Debian default public tuples by `run_id` or `artifact_id`, with SSH / API credentials passed in again.
 - **Release**: when a `v*` tag is pushed, `release.yml` rebuilds Debian Docker / non-Docker artifacts from that tagged commit instead of promoting CI artifacts, and publishes the default public surface: `.img.gz` + `.ova`.
 - **Alpine**: Alpine is no longer part of the default public release surface; use `Custom Build` when you need it.

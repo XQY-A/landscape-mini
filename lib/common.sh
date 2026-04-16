@@ -397,7 +397,7 @@ build_produced_files_manifest() {
     local artifact
     local manifest=()
 
-    for artifact in "${IMAGE_FILE}" "${VMDK_FILE}" "${PVE_OVA_FILE}"; do
+    for artifact in "${IMAGE_FILE}" "${VMDK_FILE}" "${OVA_FILE}"; do
         if [[ -f "${artifact}" ]]; then
             manifest+=("$(basename "${artifact}")")
         fi
@@ -468,20 +468,20 @@ export_vmdk() {
     echo "  VMDK created: ${VMDK_FILE}"
 }
 
-export_pve_ova() {
+export_ova() {
     local work_dir ovf_path mf_path stream_vmdk_path stream_vmdk_name
     local ovf_name mf_name
     local raw_size_bytes sectors_512 stream_vmdk_size_bytes
-    local vm_name escaped_vm_name os_desc escaped_os_desc os_id cpu_cores memory_mb
+    local vm_name escaped_vm_name os_desc escaped_os_desc os_id cpu_cores memory_mb nic_model nic_desc
 
-    if [[ -f "${PVE_OVA_FILE}" ]]; then
-        echo "  [OK] PVE OVA already present: ${PVE_OVA_FILE}"
+    if [[ -f "${OVA_FILE}" ]]; then
+        echo "  [OK] OVA already present: ${OVA_FILE}"
         return 0
     fi
 
-    echo "  Exporting PVE OVA ..."
+    echo "  Exporting OVA ..."
 
-    work_dir=$(mktemp -d "${OUTPUT_DIR}/.pve-ova-XXXXXX")
+    work_dir=$(mktemp -d "${OUTPUT_DIR}/.ova-XXXXXX")
     ovf_name="${BUILD_NAME}.ovf"
     mf_name="${BUILD_NAME}.mf"
     stream_vmdk_name="${BUILD_NAME}.vmdk"
@@ -491,8 +491,10 @@ export_pve_ova() {
 
     raw_size_bytes=$(stat -c '%s' "${IMAGE_FILE}")
     sectors_512=$(( raw_size_bytes / 512 ))
-    cpu_cores="${OVA_CPU_CORES:-2}"
-    memory_mb="${OVA_MEMORY_MB:-1024}"
+    cpu_cores=2
+    memory_mb=2048
+    nic_model="virtio"
+    nic_desc="VirtIO ethernet adapter"
 
     if [[ "${BASE_SYSTEM}" == "alpine" ]]; then
         os_id="93"
@@ -588,10 +590,10 @@ export_pve_ova() {
       <Item>
         <rasd:AutomaticAllocation>true</rasd:AutomaticAllocation>
         <rasd:Connection>bridged</rasd:Connection>
-        <rasd:Description>E1000 ethernet adapter</rasd:Description>
+        <rasd:Description>${nic_desc}</rasd:Description>
         <rasd:ElementName>ethernet0</rasd:ElementName>
         <rasd:InstanceID>5</rasd:InstanceID>
-        <rasd:ResourceSubType>E1000</rasd:ResourceSubType>
+        <rasd:ResourceSubType>${nic_model}</rasd:ResourceSubType>
         <rasd:ResourceType>10</rasd:ResourceType>
       </Item>
     </VirtualHardwareSection>
@@ -602,11 +604,11 @@ EOF
     (
         cd "${work_dir}"
         sha256sum "${ovf_name}" "${stream_vmdk_name}" | awk '{print "SHA256(" $2 ")= " $1}' > "${mf_name}"
-        tar --format=ustar -cf "${PVE_OVA_FILE}" "${ovf_name}" "${stream_vmdk_name}" "${mf_name}"
+        tar --format=ustar -cf "${OVA_FILE}" "${ovf_name}" "${stream_vmdk_name}" "${mf_name}"
     )
 
     rm -rf "${work_dir}"
-    echo "  PVE OVA created: ${PVE_OVA_FILE}"
+    echo "  OVA created: ${OVA_FILE}"
 }
 
 # =============================================================================
@@ -975,7 +977,7 @@ phase_cleanup_and_shrink() {
     rm -f "${IMAGE_FILE}.mbr"
 
     output_format_requested vmdk && export_vmdk
-    output_format_requested pve-ova && export_pve_ova
+    output_format_requested ova && export_ova
 
     if [[ "${COMPRESS_OUTPUT}" == "yes" ]]; then
         echo "  Compressing raw image with gzip ..."
@@ -1028,10 +1030,10 @@ phase_report() {
         echo "  Compressed: ${VMDK_FILE}.gz (${VMDK_GZ_SIZE})"
     fi
 
-    if [[ -f "${PVE_OVA_FILE}" ]]; then
+    if [[ -f "${OVA_FILE}" ]]; then
         local OVA_SIZE
-        OVA_SIZE=$(du -h "${PVE_OVA_FILE}" | awk '{print $1}')
-        echo "  PVE OVA   : ${PVE_OVA_FILE} (${OVA_SIZE})"
+        OVA_SIZE=$(du -h "${OVA_FILE}" | awk '{print $1}')
+        echo "  OVA image : ${OVA_FILE} (${OVA_SIZE})"
     fi
 
     if [[ -f "${BUILD_METADATA_FILE}" ]]; then

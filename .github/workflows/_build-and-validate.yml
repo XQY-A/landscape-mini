@@ -89,6 +89,10 @@ on:
         required: false
         type: number
         default: 7
+      build_timeout_minutes:
+        required: false
+        type: number
+        default: 4
     outputs:
       resolved_version:
         value: ${{ jobs.build_image.outputs.resolved_version }}
@@ -282,7 +286,7 @@ jobs:
           trap 'rm -f "$config_backup"' EXIT
 
           run_build() {
-            timeout --foreground 4m \
+            timeout --foreground "${{ inputs.build_timeout_minutes }}m" \
               sudo APT_MIRROR="" ALPINE_MIRROR="" \
               EFFECTIVE_CONFIG_PATH="${EFFECTIVE_CONFIG_PATH}" \
               EFFECTIVE_CONFIG_PROFILE="${EFFECTIVE_CONFIG_PROFILE}" \
@@ -335,8 +339,26 @@ jobs:
           mkdir -p output/metadata "${TEST_LOG_DIR}"
 
           metadata_path="output/metadata/build-metadata.txt"
+          image_file=""
+          produced_files=""
+          output_formats=""
+          landscape_version=""
+          resolved_apt_mirror=""
+          resolved_apt_mirror_source=""
+          resolved_alpine_mirror=""
+          resolved_alpine_mirror_source=""
+          resolved_docker_apt_mirror=""
+          resolved_docker_apt_mirror_source=""
+          resolved_docker_apt_gpg_url=""
+          resolved_docker_apt_gpg_url_source=""
           if [ -f "$metadata_path" ]; then
-            source "$metadata_path"
+            while IFS='=' read -r key value; do
+              case "$key" in
+                image_file|produced_files|output_formats|landscape_version|resolved_apt_mirror|resolved_apt_mirror_source|resolved_alpine_mirror|resolved_alpine_mirror_source|resolved_docker_apt_mirror|resolved_docker_apt_mirror_source|resolved_docker_apt_gpg_url|resolved_docker_apt_gpg_url_source)
+                  printf -v "$key" '%s' "$value"
+                  ;;
+              esac
+            done < "$metadata_path"
           fi
 
           image_file="${image_file:-${BUILD_NAME}.img}"
@@ -345,7 +367,7 @@ jobs:
           printf '%s\n' \
             "base_system=${{ inputs.base_system }}" \
             "include_docker=${{ inputs.include_docker }}" \
-            "output_formats=${{ inputs.output_formats }}" \
+            "output_formats=${output_formats:-${{ inputs.output_formats }}}" \
             "run_test=${RUN_TEST}" \
             "produced_files=${produced_files}" \
             "landscape_version=${landscape_version:-${RESOLVED_VERSION}}" \

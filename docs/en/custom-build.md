@@ -45,7 +45,7 @@ And for output formats:
 
 - `img`: the core format used for testing and raw-disk import
 - `vmdk`: useful when you specifically need VMDK
-- `pve-ova`: useful for PVE import
+- `ova`: useful for PVE import
 
 If you just want your first successful build, use **`debian + false + img`**.
 
@@ -156,12 +156,19 @@ Set:
 
 Set:
 
-- `output_formats=img,pve-ova`
+- `output_formats=img,ova`
+
+Notes:
+
+- `ova` is the canonical workflow input name
+- the downloadable output is still a `.ova` file
 
 That gives you both:
 
 - a raw `.img` for testing and fallback
 - an `.ova` for import workflows
+- the current OVA defaults are PVE-oriented: 2 vCPUs, 2G RAM, and a virtio NIC
+- if you want CPU type `host`, set it manually after import; it is not inherited reliably from OVF metadata today
 
 ---
 
@@ -196,11 +203,11 @@ Choose:
 - `include_docker=false`
 - `output_formats=img`
 
-### Does `pve-ova` replace `.img`?
+### Does `ova` replace `.img`?
 
 No.
 
-It is recommended to keep `img` and add `pve-ova` when needed.
+It is recommended to keep `img` and add `ova` when needed.
 
 ### Why does dataplane sometimes not run?
 
@@ -225,4 +232,4 @@ Start with:
 
 - `debian + no-docker + img`
 
-Get your first image working first, then decide whether to add Docker, switch to Alpine, or request `vmdk` / `pve-ova`.
+Get your first image working first, then decide whether to add Docker, switch to Alpine, or request `vmdk` / `ova`.

@@ -12,12 +12,12 @@ on:
     paths:
       - build.sh
       - build.env
-      - lib/**
+      - lib/**/*.sh
       - rootfs/**
       - configs/**
-      - tests/**
-      - .github/**
-      - CHANGELOG.md
+      - tests/**/*.sh
+      - .github/scripts/**/*.sh
+      - .github/workflows/*.yml
   push:
     branches:
       - main
@@ -26,12 +26,12 @@ on:
     paths:
       - build.sh
       - build.env
-      - lib/**
+      - lib/**/*.sh
       - rootfs/**
       - configs/**
-      - tests/**
-      - .github/**
-      - CHANGELOG.md
+      - tests/**/*.sh
+      - .github/scripts/**/*.sh
+      - .github/workflows/*.yml
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -39,6 +39,7 @@ concurrency:
 
 jobs:
   build:
+    if: ${{ github.event_name == 'workflow_dispatch' || !github.event.repository.fork }}
     strategy:
       fail-fast: false
       matrix:
@@ -54,3 +55,4 @@ jobs:
       run_test: ${{ matrix.run_test }}
       landscape_version: ${{ github.event.inputs.landscape_version || '' }}
       release_channel: public-ci
+      build_timeout_minutes: 4

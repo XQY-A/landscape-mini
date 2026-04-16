@@ -14,7 +14,7 @@
 #   make test-serial  - Boot image in QEMU (interactive serial console)
 #
 # Example:
-#   make build BASE_SYSTEM=alpine INCLUDE_DOCKER=true OUTPUT_FORMATS=img,pve-ova
+#   make build BASE_SYSTEM=alpine INCLUDE_DOCKER=true OUTPUT_FORMATS=img,ova
 #
 # Default credentials:  root / landscape  |  ld / landscape
 # =============================================================================

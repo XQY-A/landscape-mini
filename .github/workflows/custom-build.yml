@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       base_system:
-        description: "基础系统\nBase system"
+        description: "基础系统（首次推荐 debian）\nBase system (debian recommended for first-time users)"
         required: true
         default: debian
         type: choice
@@ -20,7 +20,7 @@ on:
           - 'false'
           - 'true'
       output_formats:
-        description: "输出格式（逗号分隔，按顺序）\nOutput formats (comma-separated, ordered)"
+        description: "输出格式：img=raw 镜像，vmdk=VMDK，ova=生成 .ova；首次建议 img，PVE 建议 img,ova\nOutput formats: img=raw image, vmdk=VMDK, ova=downloadable .ova; first run: img, for PVE: img,ova"
         default: "img"
       landscape_version:
         description: "Landscape 版本（留空时使用 build.env 默认值）\nLandscape version (empty uses build.env default)"
@@ -63,7 +63,143 @@ jobs:
       api_username_source: ${{ steps.creds.outputs.api_username_source }}
       api_password: ${{ steps.creds.outputs.api_password }}
       api_password_source: ${{ steps.creds.outputs.api_password_source }}
+      output_formats: ${{ steps.validate.outputs.output_formats }}
+      run_test: ${{ steps.validate.outputs.run_test }}
     steps:
+      - name: Validate workflow inputs early
+        id: validate
+        shell: bash
+        env:
+          INPUT_BASE_SYSTEM: ${{ github.event.inputs.base_system }}
+          INPUT_INCLUDE_DOCKER: ${{ github.event.inputs.include_docker }}
+          INPUT_OUTPUT_FORMATS: ${{ github.event.inputs.output_formats }}
+          INPUT_RUN_TEST: ${{ github.event.inputs.run_test }}
+          INPUT_LAN_SERVER_IP: ${{ github.event.inputs.lan_server_ip }}
+          INPUT_LAN_RANGE_START: ${{ github.event.inputs.lan_range_start }}
+          INPUT_LAN_RANGE_END: ${{ github.event.inputs.lan_range_end }}
+          INPUT_LAN_NETMASK: ${{ github.event.inputs.lan_netmask }}
+        run: |
+          set -euo pipefail
+
+          validate_base_system() {
+            case "$1" in
+              debian|alpine) ;;
+              *)
+                echo "ERROR: base_system must be 'debian' or 'alpine', got '$1'." >&2
+                exit 1
+                ;;
+            esac
+          }
+
+          validate_include_docker() {
+            case "$1" in
+              true|false) ;;
+              *)
+                echo "ERROR: include_docker must be 'true' or 'false', got '$1'." >&2
+                exit 1
+                ;;
+            esac
+          }
+
+          validate_output_format() {
+            case "$1" in
+              img|vmdk|ova) ;;
+              *)
+                echo "ERROR: Unsupported output format '$1'. Use img, vmdk, or ova." >&2
+                exit 1
+                ;;
+            esac
+          }
+
+          normalize_output_formats() {
+            local -a raw_items=()
+            local -a normalized=()
+            local raw_value trimmed
+            local seen=","
+
+            IFS=',' read -r -a raw_items <<< "${INPUT_OUTPUT_FORMATS}"
+            for raw_value in "${raw_items[@]}"; do
+              trimmed="${raw_value//[[:space:]]/}"
+              [ -n "$trimmed" ] || continue
+              validate_output_format "$trimmed"
+              if [[ "$seen" == *",${trimmed},"* ]]; then
+                continue
+              fi
+              normalized+=("$trimmed")
+              seen+="${trimmed},"
+            done
+
+            if [ ${#normalized[@]} -eq 0 ]; then
+              echo "ERROR: At least one output format is required." >&2
+              exit 1
+            fi
+
+            OUTPUT_FORMATS_NORMALIZED="$(IFS=,; echo "${normalized[*]}")"
+          }
+
+          normalize_run_test_selection() {
+            local selection="${INPUT_RUN_TEST,,}"
+            selection="${selection//[[:space:]]/}"
+            case "$selection" in
+              "")
+                RUN_TEST_NORMALIZED=
+                ;;
+              none)
+                RUN_TEST_NORMALIZED=none
+                ;;
+              readiness)
+                RUN_TEST_NORMALIZED=readiness
+                ;;
+              readiness,dataplane)
+                RUN_TEST_NORMALIZED=readiness,dataplane
+                ;;
+              *)
+                echo "ERROR: run_test must be empty, 'none', 'readiness', or 'readiness,dataplane'; got '${INPUT_RUN_TEST}'." >&2
+                exit 1
+                ;;
+            esac
+          }
+
+          validate_ipv4() {
+            local value="$1"
+            local label="$2"
+            [ -z "$value" ] && return 0
+            if ! [[ "$value" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+              echo "ERROR: ${label} must be an IPv4 address, got '$value'." >&2
+              exit 1
+            fi
+            IFS='.' read -r a b c d <<< "$value"
+            for octet in "$a" "$b" "$c" "$d"; do
+              if [ "$octet" -gt 255 ]; then
+                echo "ERROR: ${label} must be an IPv4 address, got '$value'." >&2
+                exit 1
+              fi
+            done
+          }
+
+          validate_netmask() {
+            local value="$1"
+            [ -z "$value" ] && return 0
+            if ! [[ "$value" =~ ^[0-9]+$ ]] || [ "$value" -lt 0 ] || [ "$value" -gt 32 ]; then
+              echo "ERROR: lan_netmask must be an integer between 0 and 32, got '$value'." >&2
+              exit 1
+            fi
+          }
+
+          validate_base_system "$INPUT_BASE_SYSTEM"
+          validate_include_docker "$INPUT_INCLUDE_DOCKER"
+          normalize_output_formats
+          normalize_run_test_selection
+          validate_ipv4 "$INPUT_LAN_SERVER_IP" lan_server_ip
+          validate_ipv4 "$INPUT_LAN_RANGE_START" lan_range_start
+          validate_ipv4 "$INPUT_LAN_RANGE_END" lan_range_end
+          validate_netmask "$INPUT_LAN_NETMASK"
+
+          {
+            echo "output_formats=$OUTPUT_FORMATS_NORMALIZED"
+            echo "run_test=$RUN_TEST_NORMALIZED"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Resolve config metadata
         id: meta
         shell: bash
@@ -137,25 +273,42 @@ jobs:
             echo "api_password_source=$api_password_source"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Credential guidance
+      - name: Build guidance
         shell: bash
         run: |
+          set -euo pipefail
           cat <<'EOF' >> "$GITHUB_STEP_SUMMARY"
-          ## 凭据说明
-          - 构建身份现在由 `base_system + include_docker + output_formats` 显式定义。
-          - 为了方便，支持直接通过 workflow inputs 传入凭据。
-          - 如果你特别注重安全，建议优先使用仓库 Secrets：`CUSTOM_ROOT_PASSWORD`、`CUSTOM_API_USERNAME`、`CUSTOM_API_PASSWORD`。
-          - 构建 metadata 只记录凭据来源，不记录 secret 值。
-          - 当前优先级：direct inputs > secrets > defaults。
-          - 测试选择使用 `run_test`：空 / `none`、`readiness`、`readiness,dataplane`。
+          ## 快速选择建议
+          - 第一次构建：`debian + false + img`
+          - 如果你要导入 PVE：`img,ova`（最终下载到的是 `.ova` 文件）
+          - `run_test` 可选：空 / `none`、`readiness`、`readiness,dataplane`
+          - `include_docker=true` 时，请求 dataplane 会被明确 skip
 
-          ## Credential guidance
-          - Build identity is now defined explicitly by `base_system + include_docker + output_formats`.
-          - Direct workflow inputs are supported for convenience.
-          - If security matters, prefer repository secrets: `CUSTOM_ROOT_PASSWORD`, `CUSTOM_API_USERNAME`, `CUSTOM_API_PASSWORD`.
-          - Build metadata records only credential sources, never secret values.
-          - Current precedence: direct inputs > secrets > defaults.
-          - Test selection uses `run_test`: empty / `none`, `readiness`, or `readiness,dataplane`.
+          ## 下载与后续使用
+          - 成功后可以从固定入口 `custom-build-latest` 下载最近一次成功构建
+          - `.img` 适合 raw 写盘、手动导盘和兜底
+          - `.ova` 适合直接导入 Proxmox VE
+          - 如需不可变产物，请使用当前 workflow run 的 Artifacts
+
+          ## 凭据说明
+          - 当前优先级：direct inputs > secrets > defaults
+          - 如果你特别注重安全，优先使用仓库 Secrets：`CUSTOM_ROOT_PASSWORD`、`CUSTOM_API_USERNAME`、`CUSTOM_API_PASSWORD`
+
+          ## Quick start hints
+          - First build: `debian + false + img`
+          - For Proxmox VE import: `img,ova` (the downloadable file is `.ova`)
+          - `run_test` supports: empty / `none`, `readiness`, `readiness,dataplane`
+          - When `include_docker=true`, requested dataplane is skipped explicitly
+
+          ## Download and next steps
+          - After success, `custom-build-latest` points to the newest successful build
+          - `.img` is for raw flashing, manual disk import, and fallback workflows
+          - `.ova` is for direct Proxmox VE import
+          - If you need immutable outputs, use the Artifacts from this workflow run
+
+          ## Credential note
+          - Current precedence: direct inputs > secrets > defaults
+          - If security matters, prefer repository secrets: `CUSTOM_ROOT_PASSWORD`, `CUSTOM_API_USERNAME`, `CUSTOM_API_PASSWORD`
           EOF
 
   build:
@@ -167,8 +320,8 @@ jobs:
     with:
       base_system: ${{ github.event.inputs.base_system }}
       include_docker: ${{ github.event.inputs.include_docker }}
-      output_formats: ${{ github.event.inputs.output_formats }}
-      run_test: ${{ github.event.inputs.run_test }}
+      output_formats: ${{ needs.prepare.outputs.output_formats }}
+      run_test: ${{ needs.prepare.outputs.run_test }}
       landscape_version: ${{ github.event.inputs.landscape_version }}
       config_profile: ${{ needs.prepare.outputs.config_profile }}
       topology_source: ${{ needs.prepare.outputs.topology_source }}
@@ -185,6 +338,7 @@ jobs:
       release_channel: custom-build-fixed
       release_tag: custom-build-latest
       repository_owner: ${{ github.repository_owner }}
+      build_timeout_minutes: 10
 
   publish-fixed-release:
     needs: build
@@ -213,7 +367,24 @@ jobs:
             exit 1
           fi
 
-          source "$metadata"
+          base_system=""
+          include_docker=""
+          produced_files=""
+          while IFS='=' read -r key value; do
+            case "$key" in
+              base_system|include_docker|produced_files)
+                printf -v "$key" '%s' "$value"
+                ;;
+            esac
+          done < "$metadata"
+
+          for key in base_system include_docker produced_files; do
+            if [ -z "${!key}" ]; then
+              echo "Missing required key in build metadata: $key" >&2
+              exit 1
+            fi
+          done
+
           base_name="landscape-mini-x86-${base_system}"
           if [ "$include_docker" = "true" ]; then
             base_name="${base_name}-docker"
@@ -278,9 +449,40 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          metadata="dist/metadata/build-metadata.txt"
+          output_formats=""
+          produced_files=""
+          while IFS='=' read -r key value; do
+            case "$key" in
+              output_formats|produced_files)
+                printf -v "$key" '%s' "$value"
+                ;;
+            esac
+          done < "$metadata"
+
+          for key in output_formats produced_files; do
+            if [ -z "${!key}" ]; then
+              echo "Missing required key in build metadata: $key" >&2
+              exit 1
+            fi
+          done
+
           {
-            echo "## Fixed custom-build release"
+            echo "## Custom Build latest output"
             echo "- Tag: ${RELEASE_TAG}"
+            echo "- Tuple: ${{ github.event.inputs.base_system }} + docker=${{ github.event.inputs.include_docker }}"
+            echo "- Requested output formats: ${output_formats}"
+            echo "- Produced files: ${produced_files}"
             echo "- Release page: https://github.com/${{ github.repository }}/releases/tag/${RELEASE_TAG}"
             echo "- Direct download base: https://github.com/${{ github.repository }}/releases/download/${RELEASE_TAG}/<asset>"
+            echo "- Note: later successful Custom Build runs replace this fixed release"
+            echo ""
+            echo "### Next steps"
+            echo "- Download `.ova` if you want to import directly into Proxmox VE"
+            echo "- Download `.img` if you want raw flashing, manual disk import, or a fallback image"
+            echo "- `build-metadata.txt` records the tuple and produced files"
+            echo "- `effective-landscape_init.toml` records the resolved network config"
+            echo "- If you need immutable outputs, use this workflow run's Artifacts"
+            echo "- In Proxmox VE, verify boot mode / disk controller / bridge after import"
+            echo "- Proxmox does not reliably import CPU type=host from OVF metadata today, so set CPU type to `host` manually after import if you want it"
           } >> "$GITHUB_STEP_SUMMARY"

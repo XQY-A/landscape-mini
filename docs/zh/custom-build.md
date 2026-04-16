@@ -45,7 +45,7 @@
 
 - `img`：最通用，测试和 raw 导盘都靠它
 - `vmdk`：适合需要 VMDK 的场景
-- `pve-ova`：适合 PVE 导入
+- `ova`：适合 PVE 导入
 
 如果你只是想先成功构建一版，**直接用 `debian + false + img`**。
 
@@ -156,12 +156,19 @@ workflow 跑完后，你仍然可以下载 Artifacts。
 
 把：
 
-- `output_formats=img,pve-ova`
+- `output_formats=img,ova`
+
+说明：
+
+- `ova` 是统一使用的 workflow 输入名
+- 最终下载到的是 `.ova` 文件
 
 这样你同时拥有：
 
 - 便于测试和兜底的 raw `.img`
 - 直接导入用的 `.ova`
+- 当前 OVA 默认面向 PVE：2 vCPU、2G 内存、virtio 网卡
+- 如果你希望 CPU type 用 `host`，请在导入 PVE 后手动设置；当前不会稳定从 OVF 自动继承
 
 ---
 
@@ -196,11 +203,11 @@ workflow 跑完后，你仍然可以下载 Artifacts。
 - `include_docker=false`
 - `output_formats=img`
 
-### `pve-ova` 是不是会替代 `.img`？
+### `ova` 会不会替代 `.img`？
 
 不会。
 
-推荐仍然保留 `img`，然后按需再加 `pve-ova`。
+推荐仍然保留 `img`，然后按需再加 `ova`。
 
 ### dataplane 为什么有时不会跑？
 
@@ -225,4 +232,4 @@ workflow 跑完后，你仍然可以下载 Artifacts。
 
 - `debian + no-docker + img`
 
-先把第一份镜像做出来，再决定要不要加 Docker、换 Alpine 或增加 `vmdk` / `pve-ova`。
+先把第一份镜像做出来，再决定要不要加 Docker、换 Alpine 或增加 `vmdk` / `ova`。
