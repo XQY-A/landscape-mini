@@ -557,6 +557,49 @@ jobs:
       - name: List outputs
         run: ls -lh output/
 
+      - name: Resolve test credentials
+        id: test_creds
+        shell: bash
+        env:
+          INPUT_ROOT_PASSWORD: ${{ inputs.root_password }}
+          INPUT_API_USERNAME: ${{ inputs.api_username }}
+          INPUT_API_PASSWORD: ${{ inputs.api_password }}
+          SECRET_ROOT_PASSWORD: ${{ secrets.CUSTOM_ROOT_PASSWORD }}
+          SECRET_API_USERNAME: ${{ secrets.CUSTOM_API_USERNAME }}
+          SECRET_API_PASSWORD: ${{ secrets.CUSTOM_API_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          root_password="$INPUT_ROOT_PASSWORD"
+          if [ -z "$root_password" ]; then
+            root_password="$SECRET_ROOT_PASSWORD"
+          fi
+          if [ -z "$root_password" ]; then
+            root_password="landscape"
+          fi
+
+          api_username="$INPUT_API_USERNAME"
+          if [ -z "$api_username" ]; then
+            api_username="$SECRET_API_USERNAME"
+          fi
+          if [ -z "$api_username" ]; then
+            api_username="root"
+          fi
+
+          api_password="$INPUT_API_PASSWORD"
+          if [ -z "$api_password" ]; then
+            api_password="$SECRET_API_PASSWORD"
+          fi
+          if [ -z "$api_password" ]; then
+            api_password="root"
+          fi
+
+          {
+            echo "root_password=$root_password"
+            echo "api_username=$api_username"
+            echo "api_password=$api_password"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Run readiness checks (${{ inputs.base_system }}, docker=${{ inputs.include_docker }})
         env:
           LANDSCAPE_TEST_BASE_SYSTEM: ${{ inputs.base_system }}
@@ -567,9 +610,9 @@ jobs:
           LANDSCAPE_TEST_ARTIFACT_ID: ${{ needs.build_image.outputs.artifact_id }}
           LANDSCAPE_TEST_LANDSCAPE_VERSION: ${{ needs.build_image.outputs.resolved_version }}
           LANDSCAPE_EFFECTIVE_INIT_CONFIG: output/metadata/effective-landscape_init.toml
-          SSH_PASSWORD: ${{ inputs.root_password }}
-          API_USERNAME: ${{ inputs.api_username }}
-          API_PASSWORD: ${{ inputs.api_password }}
+          SSH_PASSWORD: ${{ steps.test_creds.outputs.root_password }}
+          API_USERNAME: ${{ steps.test_creds.outputs.api_username }}
+          API_PASSWORD: ${{ steps.test_creds.outputs.api_password }}
         run: timeout --foreground 20m ./tests/test-readiness.sh output/${{ needs.build_image.outputs.build_name }}.img
 
       - name: Upload readiness log fragment
@@ -639,7 +682,46 @@ jobs:
 
       - name: List outputs
         run: ls -lh output/
-
+        
+      - name: Resolve test credentials
+        id: test_creds
+        shell: bash
+        env:
+          INPUT_ROOT_PASSWORD: ${{ inputs.root_password }}
+          INPUT_API_USERNAME: ${{ inputs.api_username }}
+          INPUT_API_PASSWORD: ${{ inputs.api_password }}
+          SECRET_ROOT_PASSWORD: ${{ secrets.CUSTOM_ROOT_PASSWORD }}
+          SECRET_API_USERNAME: ${{ secrets.CUSTOM_API_USERNAME }}
+          SECRET_API_PASSWORD: ${{ secrets.CUSTOM_API_PASSWORD }}
+        run: |
+          set -euo pipefail
+          root_password="$INPUT_ROOT_PASSWORD"
+          if [ -z "$root_password" ]; then
+            root_password="$SECRET_ROOT_PASSWORD"
+          fi
+          if [ -z "$root_password" ]; then
+            root_password="landscape"
+          fi
+          api_username="$INPUT_API_USERNAME"
+          if [ -z "$api_username" ]; then
+            api_username="$SECRET_API_USERNAME"
+          fi
+          if [ -z "$api_username" ]; then
+            api_username="root"
+          fi
+          api_password="$INPUT_API_PASSWORD"
+          if [ -z "$api_password" ]; then
+            api_password="$SECRET_API_PASSWORD"
+          fi
+          if [ -z "$api_password" ]; then
+            api_password="root"
+          fi
+          {
+            echo "root_password=$root_password"
+            echo "api_username=$api_username"
+            echo "api_password=$api_password"
+          } >> "$GITHUB_OUTPUT"
+          
       - name: Run dataplane tests (${{ inputs.base_system }}, docker=${{ inputs.include_docker }})
         env:
           LANDSCAPE_TEST_BASE_SYSTEM: ${{ inputs.base_system }}
@@ -650,9 +732,9 @@ jobs:
           LANDSCAPE_TEST_ARTIFACT_ID: ${{ needs.build_image.outputs.artifact_id }}
           LANDSCAPE_TEST_LANDSCAPE_VERSION: ${{ needs.build_image.outputs.resolved_version }}
           LANDSCAPE_EFFECTIVE_INIT_CONFIG: output/metadata/effective-landscape_init.toml
-          SSH_PASSWORD: ${{ inputs.root_password }}
-          API_USERNAME: ${{ inputs.api_username }}
-          API_PASSWORD: ${{ inputs.api_password }}
+          SSH_PASSWORD: ${{ steps.test_creds.outputs.root_password }}
+          API_USERNAME: ${{ steps.test_creds.outputs.api_username }}
+          API_PASSWORD: ${{ steps.test_creds.outputs.api_password }}
         run: timeout --foreground 25m ./tests/test-dataplane.sh output/${{ needs.build_image.outputs.build_name }}.img
 
       - name: Upload dataplane log fragment
