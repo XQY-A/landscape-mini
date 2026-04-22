@@ -233,9 +233,9 @@ jobs:
             echo ""
             echo "| 凭据项 | 来源 |"
             echo "| --- | --- |"
-            echo "| Linux 密码 | direct-eval |"
-            echo "| Web 用户名 | direct-eval |"
-            echo "| Web 密码 | direct-eval |"
+            echo "| Linux 密码 | input-or-inherited-secret-or-default |"
+            echo "| Web 用户名 | input-or-inherited-secret-or-default |"
+            echo "| Web 密码 | input-or-inherited-secret-or-default |"
             echo ""
             echo "## 后续流程"
             echo ""
@@ -267,16 +267,17 @@ jobs:
       lan_range_start: ${{ github.event.inputs.lan_range_start }}
       lan_range_end: ${{ github.event.inputs.lan_range_end }}
       lan_netmask: ${{ github.event.inputs.lan_netmask }}
-      root_password: ${{ github.event.inputs.root_password != '' && github.event.inputs.root_password || secrets.CUSTOM_ROOT_PASSWORD != '' && secrets.CUSTOM_ROOT_PASSWORD || 'landscape' }}
-      root_password_source: ${{ github.event.inputs.root_password != '' && 'input' || secrets.CUSTOM_ROOT_PASSWORD != '' && 'secret' || 'default' }}
-      api_username: ${{ github.event.inputs.api_username != '' && github.event.inputs.api_username || secrets.CUSTOM_API_USERNAME != '' && secrets.CUSTOM_API_USERNAME || 'root' }}
-      api_username_source: ${{ github.event.inputs.api_username != '' && 'input' || secrets.CUSTOM_API_USERNAME != '' && 'secret' || 'default' }}
-      api_password: ${{ github.event.inputs.api_password != '' && github.event.inputs.api_password || secrets.CUSTOM_API_PASSWORD != '' && secrets.CUSTOM_API_PASSWORD || 'root' }}
-      api_password_source: ${{ github.event.inputs.api_password != '' && 'input' || secrets.CUSTOM_API_PASSWORD != '' && 'secret' || 'default' }}
+      root_password: ${{ github.event.inputs.root_password }}
+      root_password_source: ${{ github.event.inputs.root_password != '' && 'input' || 'default' }}
+      api_username: ${{ github.event.inputs.api_username }}
+      api_username_source: ${{ github.event.inputs.api_username != '' && 'input' || 'default' }}
+      api_password: ${{ github.event.inputs.api_password }}
+      api_password_source: ${{ github.event.inputs.api_password != '' && 'input' || 'default' }}
       release_channel: custom-build-fixed
       release_tag: custom-build-latest
       repository_owner: ${{ github.repository_owner }}
       build_timeout_minutes: 10
+    secrets: inherit
 
   publish-fixed-release:
     needs: build
