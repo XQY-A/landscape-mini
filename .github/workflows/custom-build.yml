@@ -57,12 +57,6 @@ jobs:
     outputs:
       config_profile: ${{ steps.meta.outputs.config_profile }}
       topology_source: ${{ steps.meta.outputs.topology_source }}
-      root_password: ${{ steps.creds.outputs.root_password }}
-      root_password_source: ${{ steps.creds.outputs.root_password_source }}
-      api_username: ${{ steps.creds.outputs.api_username }}
-      api_username_source: ${{ steps.creds.outputs.api_username_source }}
-      api_password: ${{ steps.creds.outputs.api_password }}
-      api_password_source: ${{ steps.creds.outputs.api_password_source }}
       output_formats: ${{ steps.validate.outputs.output_formats }}
       run_test: ${{ steps.validate.outputs.run_test }}
     steps:
@@ -218,61 +212,6 @@ jobs:
             echo "topology_source=$topology_source"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Resolve credentials with precedence
-        id: creds
-        env:
-          INPUT_ROOT_PASSWORD: ${{ github.event.inputs.root_password }}
-          INPUT_API_USERNAME: ${{ github.event.inputs.api_username }}
-          INPUT_API_PASSWORD: ${{ github.event.inputs.api_password }}
-          SECRET_ROOT_PASSWORD: ${{ secrets.CUSTOM_ROOT_PASSWORD }}
-          SECRET_API_USERNAME: ${{ secrets.CUSTOM_API_USERNAME }}
-          SECRET_API_PASSWORD: ${{ secrets.CUSTOM_API_PASSWORD }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          root_password="$INPUT_ROOT_PASSWORD"
-          root_password_source=input
-          if [ -z "$root_password" ]; then
-            root_password="$SECRET_ROOT_PASSWORD"
-            root_password_source=secret
-          fi
-          if [ -z "$root_password" ]; then
-            root_password="landscape"
-            root_password_source=default
-          fi
-
-          api_username="$INPUT_API_USERNAME"
-          api_username_source=input
-          if [ -z "$api_username" ]; then
-            api_username="$SECRET_API_USERNAME"
-            api_username_source=secret
-          fi
-          if [ -z "$api_username" ]; then
-            api_username="root"
-            api_username_source=default
-          fi
-
-          api_password="$INPUT_API_PASSWORD"
-          api_password_source=input
-          if [ -z "$api_password" ]; then
-            api_password="$SECRET_API_PASSWORD"
-            api_password_source=secret
-          fi
-          if [ -z "$api_password" ]; then
-            api_password="root"
-            api_password_source=default
-          fi
-
-          {
-            echo "root_password=$root_password"
-            echo "root_password_source=$root_password_source"
-            echo "api_username=$api_username"
-            echo "api_username_source=$api_username_source"
-            echo "api_password=$api_password"
-            echo "api_password_source=$api_password_source"
-          } >> "$GITHUB_OUTPUT"
-
       - name: Prepare build summary
         shell: bash
         run: |
@@ -294,9 +233,9 @@ jobs:
             echo ""
             echo "| 凭据项 | 来源 |"
             echo "| --- | --- |"
-            echo "| Linux 密码 | ${{ steps.creds.outputs.root_password_source }} |"
-            echo "| Web 用户名 | ${{ steps.creds.outputs.api_username_source }} |"
-            echo "| Web 密码 | ${{ steps.creds.outputs.api_password_source }} |"
+            echo "| Linux 密码 | direct-eval |"
+            echo "| Web 用户名 | direct-eval |"
+            echo "| Web 密码 | direct-eval |"
             echo ""
             echo "## 后续流程"
             echo ""
@@ -328,12 +267,12 @@ jobs:
       lan_range_start: ${{ github.event.inputs.lan_range_start }}
       lan_range_end: ${{ github.event.inputs.lan_range_end }}
       lan_netmask: ${{ github.event.inputs.lan_netmask }}
-      root_password: ${{ needs.prepare.outputs.root_password }}
-      root_password_source: ${{ needs.prepare.outputs.root_password_source }}
-      api_username: ${{ needs.prepare.outputs.api_username }}
-      api_username_source: ${{ needs.prepare.outputs.api_username_source }}
-      api_password: ${{ needs.prepare.outputs.api_password }}
-      api_password_source: ${{ needs.prepare.outputs.api_password_source }}
+      root_password: ${{ github.event.inputs.root_password != '' && github.event.inputs.root_password || secrets.CUSTOM_ROOT_PASSWORD != '' && secrets.CUSTOM_ROOT_PASSWORD || 'landscape' }}
+      root_password_source: ${{ github.event.inputs.root_password != '' && 'input' || secrets.CUSTOM_ROOT_PASSWORD != '' && 'secret' || 'default' }}
+      api_username: ${{ github.event.inputs.api_username != '' && github.event.inputs.api_username || secrets.CUSTOM_API_USERNAME != '' && secrets.CUSTOM_API_USERNAME || 'root' }}
+      api_username_source: ${{ github.event.inputs.api_username != '' && 'input' || secrets.CUSTOM_API_USERNAME != '' && 'secret' || 'default' }}
+      api_password: ${{ github.event.inputs.api_password != '' && github.event.inputs.api_password || secrets.CUSTOM_API_PASSWORD != '' && secrets.CUSTOM_API_PASSWORD || 'root' }}
+      api_password_source: ${{ github.event.inputs.api_password != '' && 'input' || secrets.CUSTOM_API_PASSWORD != '' && 'secret' || 'default' }}
       release_channel: custom-build-fixed
       release_tag: custom-build-latest
       repository_owner: ${{ github.repository_owner }}
