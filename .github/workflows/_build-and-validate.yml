@@ -313,6 +313,9 @@ jobs:
             LANDSCAPE_ADMIN_PASS="root"
             LANDSCAPE_ADMIN_PASS_SOURCE="default"
           fi
+          echo "ROOT_PASSWORD_SOURCE=${ROOT_PASSWORD_SOURCE}, ROOT_PASSWORD_LEN=${#ROOT_PASSWORD}"
+          echo "API_USERNAME_SOURCE=${LANDSCAPE_ADMIN_USER_SOURCE}, API_USERNAME_LEN=${#LANDSCAPE_ADMIN_USER}"
+          echo "API_PASSWORD_SOURCE=${LANDSCAPE_ADMIN_PASS_SOURCE}, API_PASSWORD_LEN=${#LANDSCAPE_ADMIN_PASS}"
           version_flag=()
           if [ -n "${RESOLVED_VERSION}" ]; then
             version_flag=(--version "${RESOLVED_VERSION}")
