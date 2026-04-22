@@ -97,6 +97,13 @@ on:
         required: false
         type: number
         default: 4
+    secrets:
+      CUSTOM_ROOT_PASSWORD:
+        required: false
+      CUSTOM_API_USERNAME:
+        required: false
+      CUSTOM_API_PASSWORD:
+        required: false
     outputs:
       resolved_version:
         value: ${{ jobs.build_image.outputs.resolved_version }}
@@ -258,12 +265,15 @@ jobs:
           EFFECTIVE_CONFIG_PATH: ${{ github.workspace }}/output/metadata/effective-landscape_init.toml
           EFFECTIVE_CONFIG_PROFILE: ${{ inputs.config_profile }}
           EFFECTIVE_TOPOLOGY_SOURCE: ${{ inputs.topology_source }}
-          ROOT_PASSWORD: ${{ inputs.root_password }}
-          ROOT_PASSWORD_SOURCE: ${{ inputs.root_password_source }}
-          LANDSCAPE_ADMIN_USER: ${{ inputs.api_username }}
-          LANDSCAPE_ADMIN_USER_SOURCE: ${{ inputs.api_username_source }}
-          LANDSCAPE_ADMIN_PASS: ${{ inputs.api_password }}
-          LANDSCAPE_ADMIN_PASS_SOURCE: ${{ inputs.api_password_source }}
+          INPUT_ROOT_PASSWORD: ${{ inputs.root_password }}
+          INPUT_ROOT_PASSWORD_SOURCE: ${{ inputs.root_password_source }}
+          INPUT_API_USERNAME: ${{ inputs.api_username }}
+          INPUT_API_USERNAME_SOURCE: ${{ inputs.api_username_source }}
+          INPUT_API_PASSWORD: ${{ inputs.api_password }}
+          INPUT_API_PASSWORD_SOURCE: ${{ inputs.api_password_source }}
+          SECRET_ROOT_PASSWORD: ${{ secrets.CUSTOM_ROOT_PASSWORD }}
+          SECRET_API_USERNAME: ${{ secrets.CUSTOM_API_USERNAME }}
+          SECRET_API_PASSWORD: ${{ secrets.CUSTOM_API_PASSWORD }}
           RUN_TEST: ${{ steps.tests.outputs.run_test }}
           RELEASE_CHANNEL: ${{ inputs.release_channel }}
           RELEASE_TAG: ${{ inputs.release_tag }}
@@ -271,7 +281,38 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          ROOT_PASSWORD="$INPUT_ROOT_PASSWORD"
+          ROOT_PASSWORD_SOURCE="$INPUT_ROOT_PASSWORD_SOURCE"
+          if [ -z "$ROOT_PASSWORD" ]; then
+            ROOT_PASSWORD="$SECRET_ROOT_PASSWORD"
+            ROOT_PASSWORD_SOURCE="secret"
+          fi
+          if [ -z "$ROOT_PASSWORD" ]; then
+            ROOT_PASSWORD="landscape"
+            ROOT_PASSWORD_SOURCE="default"
+          fi
 
+          LANDSCAPE_ADMIN_USER="$INPUT_API_USERNAME"
+          LANDSCAPE_ADMIN_USER_SOURCE="$INPUT_API_USERNAME_SOURCE"
+          if [ -z "$LANDSCAPE_ADMIN_USER" ]; then
+            LANDSCAPE_ADMIN_USER="$SECRET_API_USERNAME"
+            LANDSCAPE_ADMIN_USER_SOURCE="secret"
+          fi
+          if [ -z "$LANDSCAPE_ADMIN_USER" ]; then
+            LANDSCAPE_ADMIN_USER="root"
+            LANDSCAPE_ADMIN_USER_SOURCE="default"
+          fi
+
+          LANDSCAPE_ADMIN_PASS="$INPUT_API_PASSWORD"
+          LANDSCAPE_ADMIN_PASS_SOURCE="$INPUT_API_PASSWORD_SOURCE"
+          if [ -z "$LANDSCAPE_ADMIN_PASS" ]; then
+            LANDSCAPE_ADMIN_PASS="$SECRET_API_PASSWORD"
+            LANDSCAPE_ADMIN_PASS_SOURCE="secret"
+          fi
+          if [ -z "$LANDSCAPE_ADMIN_PASS" ]; then
+            LANDSCAPE_ADMIN_PASS="root"
+            LANDSCAPE_ADMIN_PASS_SOURCE="default"
+          fi
           version_flag=()
           if [ -n "${RESOLVED_VERSION}" ]; then
             version_flag=(--version "${RESOLVED_VERSION}")
